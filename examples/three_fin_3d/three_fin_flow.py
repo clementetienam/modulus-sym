@@ -18,38 +18,33 @@ import os
 import warnings
 
 import torch
-from torch.utils.data import DataLoader, Dataset
 from sympy import Symbol, Eq, Abs, tanh, Or, And
 import numpy as np
 import itertools
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, PhysicsNeMoConfig
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
     IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.eq.pdes.turbulence_zero_eq import ZeroEquation
-from modulus.sym.eq.pdes.basic import NormalDotVec, GradNormal
-from modulus.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
-from modulus.sym.models.fully_connected import FullyConnectedArch
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.navier_stokes import NavierStokes
+from physicsnemo.sym.eq.pdes.turbulence_zero_eq import ZeroEquation
+from physicsnemo.sym.eq.pdes.basic import NormalDotVec
+from physicsnemo.sym.models.fully_connected import FullyConnectedArch
 
 from three_fin_geometry import *
 
 
-@modulus.sym.main(config_path="conf", config_name="conf_flow")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="conf_flow")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # make navier stokes equations
     if cfg.custom.turbulent:
         ze = ZeroEquation(nu=0.002, dim=3, time=False, max_distance=0.5)
@@ -260,7 +255,7 @@ def run(cfg: ModulusConfig) -> None:
         flow_domain.add_validator(openfoam_validator)
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # add pressure monitor
@@ -331,7 +326,7 @@ def run(cfg: ModulusConfig) -> None:
                 + str(HS_thickness_s)
             )
             invar_pressure = geo.integral_plane.sample_boundary(
-                1024,
+                cfg.batch_size.MonitorPlane,
                 parameterization=plane_param_ranges,
             )
             front_pressure_monitor = PointwiseMonitor(
@@ -362,7 +357,7 @@ def run(cfg: ModulusConfig) -> None:
                 + str(HS_thickness_s)
             )
             invar_pressure = geo.integral_plane.sample_boundary(
-                1024,
+                cfg.batch_size.MonitorPlane,
                 parameterization=plane_param_ranges,
             )
             back_pressure_monitor = PointwiseMonitor(

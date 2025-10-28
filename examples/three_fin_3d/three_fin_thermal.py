@@ -18,38 +18,33 @@ import os
 import warnings
 
 import torch
-from sympy import Symbol, Eq, Abs, tanh, Or, And
+from sympy import Eq, tanh, Or, And
 import itertools
 import numpy as np
 
-import modulus.sym
-from modulus.sym.hydra.config import ModulusConfig
-from modulus.sym.hydra import to_absolute_path, instantiate_arch
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.models.fully_connected import FullyConnectedArch
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra.config import PhysicsNeMoConfig
+from physicsnemo.sym.hydra import to_absolute_path
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.models.fully_connected import FullyConnectedArch
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
-    IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.inferencer import PointwiseInferencer
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.eq.pdes.basic import NormalDotVec, GradNormal
-from modulus.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.basic import GradNormal
+from physicsnemo.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
 
 from three_fin_geometry import *
 
 
-@modulus.sym.main(config_path="conf", config_name="conf_thermal")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="conf_thermal")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # make thermal equations
     ad = AdvectionDiffusion(T="theta_f", rho=1.0, D=0.02, dim=3, time=False)
     dif = Diffusion(T="theta_s", D=0.0625, dim=3, time=False)
@@ -265,7 +260,7 @@ def run(cfg: ModulusConfig) -> None:
                 "fin_length_s",
             ]
         }
-        openfoam_flow_outvar_numpy = {
+        {
             key: value
             for key, value in openfoam_var.items()
             if key in ["u", "v", "w", "p"]
@@ -324,9 +319,7 @@ def run(cfg: ModulusConfig) -> None:
                 "fin_length_s",
             ]
         }
-        openfoam_outvar_solid_numpy = {
-            key: value for key, value in openfoam_var.items() if key in ["theta_s"]
-        }
+        {key: value for key, value in openfoam_var.items() if key in ["theta_s"]}
         openfoam_solid_validator = PointwiseValidator(
             nodes=thermal_nodes,
             invar=openfoam_invar_solid_numpy,
@@ -338,7 +331,7 @@ def run(cfg: ModulusConfig) -> None:
         )
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
     # add peak temp monitors for design optimization
     # run only for parameterized cases and in eval mode
@@ -393,7 +386,7 @@ def run(cfg: ModulusConfig) -> None:
                 + str(HS_thickness_s)
             )
             invar_temp = geo.three_fin.sample_boundary(
-                5000,
+                cfg.batch_size.MonitorHeatSource,
                 criteria=Eq(y, source_origin[1]),
                 parameterization=plane_param_ranges,
             )

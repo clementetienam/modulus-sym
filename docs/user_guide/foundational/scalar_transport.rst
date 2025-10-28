@@ -20,7 +20,7 @@ model the heat transfer in a 2D flow. In this tutorial you will learn:
 
 .. note::
    This tutorial assumes that you have completed tutorial :ref:`Introductory Example` and have 
-   familiarized yourself with the basics of the Modulus Sym APIs.
+   familiarized yourself with the basics of the PhysicsNeMo Sym APIs.
  
 Problem Description
 -------------------
@@ -35,7 +35,7 @@ as the peak velocity. The kinematic viscosity :math:`\nu` is set to 0.01
 :math:`m^2/s` and the Prandtl number is 5. Although the flow is laminar,
 the Zero Equation turbulence model is kept on.
 
-.. figure:: /images/user_guide/threeFin_2d_geom.png
+.. figure:: ../../images/user_guide/threeFin_2d_geom.png
    :alt: 2D slice of three fin heat sink geometry (All dimensions in :math:`m`)
    :name: fig:threeFin_2d
    :width: 100.0%
@@ -184,15 +184,15 @@ Once the python file is setup, the training can be started by executing the pyth
 Results and Post-processing
 ---------------------------
 
-The results for the Modulus Sym simulation are compared against the OpenFOAM
+The results for the PhysicsNeMo Sym simulation are compared against the OpenFOAM
 data in :numref:`fig-2d_heat_sink_results`.
 
 .. _fig-2d_heat_sink_results:
 
-.. figure:: /images/user_guide/heatSink_try4.png
-   :alt: Left: Modulus Sym. Center: OpenFOAM. Right: Difference
+.. figure:: ../../images/user_guide/heatSink_try4.png
+   :alt: Left: PhysicsNeMo Sym. Center: OpenFOAM. Right: Difference
    :name: fig:2d_heat_sink_results
    :width: 100.0%
    :align: center
 
-   Left: Modulus Sym. Center: OpenFOAM. Right: Difference
+   Left: PhysicsNeMo Sym. Center: OpenFOAM. Right: Difference

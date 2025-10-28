@@ -6,9 +6,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0a0] - 2024-03-XX
+## [2.3.0a0] - 2025-XX-YY
 
 ### Added
+
+- Added Blackwell support
 
 ### Changed
 
@@ -21,6 +23,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 ### Dependencies
+
+
+## [2.2.0] - 2025-08-26
+
+### Added
+
+- Improved performance of connectivity calculation. Refactor of Least squares
+  gradients
+- Added Incompressible Navier Stokes PDE as a special formulation
+- Added ability for `make_nodes` function to return a dict
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+### Dependencies
+
+## [2.1.0] - 2025-06-10
+
+### Fixed
+
+- Fix the zero equation formulation to correctly reflect turbulent kinematic viscosity
+
+- Made `tiny-cuda-nn` optional in deployment image
+
+## [2.0.0] - 2025-03-18
+
+### Changed
+
+- Update `inspect.getargspec` usage
+
+### Fixed
+
+- Fix optimizer checkpoint loading errors
+
+### Dependencies
+
+- Remove upper bound for Cython
+- Add upper bound for numpoly (transitive dependency of chaospy)
+
+## [1.8.0] - 2024-12-04
+
+### Added
+
+- Added devcontainer support.
+
+### Changed
+
+- Speeds up CUDA extension build by about 3x.
+
+### Fixed
+
+- Fix the area calculated for STL meshes.
+
+### Dependencies
+
+- Relaxes versions for several dependencies.
+
+## [1.7.0] - 2024-09-24
+
+### Added
+
+- AMP for derivatives.
+- DALI based dataloader for Geometry module.
+- Generalized PDE residual computing utility.
+- Support for spatial gradients calculations using finite difference, meshless finite
+  difference, spectral and least squares methods.
+- Add docs for SDF and relevant features for geometry module.
+
+### Dependencies
+
+- Upgrade Sympy and Scikit-Learn versions.
+
+### Security
+
+- Upgrade notebook, opencv-python and setuptools versions to fix CVEs GHSA-9q39-rmj3-p4r2,
+  GHSA-qr4w-53vh-m672, and GHSA-cx63-2mw6-8hw5 respectively.
+
+## [1.6.0] - 2024-07-23
+
+### Added
+
+- Added inference notebook for Turbulence Super-resolution example.
+
+### Changed
+
+- Warp based backed for STL geometry handling
+
+### Dependencies
+
+- Update `timm` dependency
+- Update minimum python version to 3.10
+
+## [1.5.0] - 2024-04-17
+
+### Added
+
+- Added reservoir examples using GenAI and CCUS workflows.
+
+### Security
+
+- Update OpenCV and Pillow versions to fix security
 
 ## [1.4.0] - 2024-01-25
 
@@ -38,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Integrated the network architecture layers into Modulus-Core.
+- Integrated the network architecture layers into PhysicsNeMo-Core.
 
 ### Fixed
 
@@ -67,7 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- Accompanying licenses (will provide in the Modulus docker image).
+- Accompanying licenses (will provide in the PhysicsNeMo docker image).
 
 ### Fixed
 

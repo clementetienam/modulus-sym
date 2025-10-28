@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sympy import tanh, Symbol, Function
+from sympy import Symbol, Function
 
-from modulus.sym.eq.pde import PDE
+from physicsnemo.sym.eq.pde import PDE
 
 
 class FluxDiffusion(PDE):

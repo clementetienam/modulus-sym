@@ -16,36 +16,31 @@
 
 import torch
 import numpy as np
-from sympy import Symbol, Eq, sin, cos, Min, Max, Abs, log, exp
+from sympy import Symbol, sin, Min, log, exp
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
-from modulus.sym.utils.sympy.functions import parabola
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.geometry.primitives_2d import Line, Channel2D
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
-    IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.domain.inferencer import PointwiseInferencer
-from modulus.sym.key import Key
-from modulus.sym.node import Node
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.domain.inferencer import PointwiseInferencer
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.node import Node
 
 from custom_k_ep import kEpsilonInit, kEpsilon, kEpsilonStdWF
 
 
-@modulus.sym.main(config_path="conf_re590_k_ep", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf_re590_k_ep", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # simulation parameters
     Re = 590
     nu = 1 / Re
     y_plus = 30
-    karman_constant = 0.4187
     resolved_y_start = y_plus * nu
     channel_width = (-1, 1)
     channel_length = (-np.pi / 2, np.pi / 2)
@@ -61,7 +56,7 @@ def run(cfg: ModulusConfig) -> None:
         normal=1,
     )
 
-    geo_sdf = Channel2D(
+    Channel2D(
         (channel_length[0], channel_width[0]), (channel_length[1], channel_width[1])
     )
 

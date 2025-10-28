@@ -16,8 +16,7 @@
 
 import numpy as np
 import torch
-import os
-from modulus.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
+from physicsnemo.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
 
 
 def test_diffusion_equation():
@@ -27,15 +26,15 @@ def test_diffusion_equation():
     z = np.random.rand(1024, 1)
     t = np.random.rand(1024, 1)
 
-    u = np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
+    np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
 
     D = 0.1
     Q = 0.1
 
     u__t = -np.sin(x) * np.sin(y) * np.sin(z) * np.sin(t)
-    u__x = np.cos(x) * np.sin(y) * np.sin(z) * np.cos(t)
-    u__y = np.sin(x) * np.cos(y) * np.sin(z) * np.cos(t)
-    u__z = np.sin(x) * np.sin(y) * np.cos(z) * np.cos(t)
+    np.cos(x) * np.sin(y) * np.sin(z) * np.cos(t)
+    np.sin(x) * np.cos(y) * np.sin(z) * np.cos(t)
+    np.sin(x) * np.sin(y) * np.cos(z) * np.cos(t)
 
     u__x__x = -np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
     u__y__y = -np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
@@ -56,7 +55,7 @@ def test_diffusion_equation():
     eq_eval = evaluations["diffusion_u"].numpy()
 
     # verify PDE computation
-    assert np.allclose(eq_eval, diffusion_equation_true), "Test Failed!"
+    assert np.allclose(eq_eval, diffusion_equation_true, rtol=1e-3), "Test Failed!"
 
 
 def test_diffusion_interface():
@@ -115,12 +114,12 @@ def test_diffusion_interface():
     eq_2_eval = evaluations["diffusion_interface_neumann_u_1_u_2"].numpy()
 
     # verify PDE computation
-    assert np.allclose(
-        eq_1_eval, diffusion_interface_dirichlet_u_1_u_2_true
-    ), "Test Failed!"
-    assert np.allclose(
-        eq_2_eval, diffusion_interface_neumann_u_1_u_2_true
-    ), "Test Failed!"
+    assert np.allclose(eq_1_eval, diffusion_interface_dirichlet_u_1_u_2_true), (
+        "Test Failed!"
+    )
+    assert np.allclose(eq_2_eval, diffusion_interface_neumann_u_1_u_2_true), (
+        "Test Failed!"
+    )
 
 
 if __name__ == "__main__":

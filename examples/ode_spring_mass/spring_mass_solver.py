@@ -15,26 +15,24 @@
 # limitations under the License.
 
 import numpy as np
-from sympy import Symbol, Eq
+from sympy import Symbol
 
-import modulus.sym
-from modulus.sym.hydra import instantiate_arch, ModulusConfig
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_1d import Point1D
-from modulus.sym.domain.constraint import (
-    PointwiseBoundaryConstraint,
+import physicsnemo.sym
+from physicsnemo.sym.hydra import instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.geometry.primitives_1d import Point1D
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
 )
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.key import Key
-from modulus.sym.node import Node
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.key import Key
 
 from spring_mass_ode import SpringMass
 
 
-@modulus.sym.main(config_path="conf", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # make list of nodes to unroll graph on
     sm = SpringMass(k=(2, 1, 1, 2), m=(1, 1, 1))
     sm_net = instantiate_arch(
@@ -49,7 +47,7 @@ def run(cfg: ModulusConfig) -> None:
     geo = Point1D(0)
     t_max = 10.0
     t_symbol = Symbol("t")
-    x = Symbol("x")
+    Symbol("x")
     time_range = {t_symbol: (0, t_max)}
 
     # make domain

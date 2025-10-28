@@ -14,19 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-from torch.utils.data import DataLoader, Dataset
 
-from sympy import Symbol, Eq, Abs, tanh
+from sympy import Symbol
 
-import numpy as np
 
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.geometry import Parameterization
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.key import Key
-from modulus.sym.node import Node
+from physicsnemo.sym.geometry import Parameterization
+from physicsnemo.sym.geometry.primitives_3d import Box, Channel, Plane
 
 # define sympy varaibles to parametize domain curves
 x, y, z = Symbol("x"), Symbol("y"), Symbol("z")
@@ -106,7 +99,7 @@ class ThreeFin(object):
             ),
             parameterization=pr,
         )
-        fin_center = (
+        (
             fin_origin[0] + fin_dim[0] / 2,
             fin_origin[1] + fin_dim[1] / 2,
             fin_origin[2] + fin_dim[2] / 2,

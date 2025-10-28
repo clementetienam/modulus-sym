@@ -6,7 +6,7 @@ Darcy Flow with Adaptive Fourier Neural Operator
 
 Introduction
 ------------
-This tutorial demonstrates the use of transformer networks based on the Adaptive Fourier Neural Operators (AFNO) in Modulus Sym. 
+This tutorial demonstrates the use of transformer networks based on the Adaptive Fourier Neural Operators (AFNO) in PhysicsNeMo Sym. 
 Note that in contrast with the :ref:`fno` which has a convolutional architecture, the AFNO leverages contemporary transformer architectures in the computer vision domain. 
 Vision transformers have delivered tremendous success in computer vision. 
 This is primarily due to effective self-attention mechanisms. 
@@ -19,17 +19,17 @@ This includes imposing a block diagonal structure on the channel mixing weights,
 
 This tutorial presents the use of the AFNO transformer for modeling a PDE system. 
 While AFNO has been designed for scaling to extremely high resolution inputs that the FNO cannot handle as well (see [#pathak2022fourcastnet]_), here only a simple example using Darcy flow is presented.
-This problem is intended as an illustrative starting point for data-driven training using AFNO in Modulus Sym but should not be regarded as leveraging the full extent of AFNO's functionality.
+This problem is intended as an illustrative starting point for data-driven training using AFNO in PhysicsNeMo Sym but should not be regarded as leveraging the full extent of AFNO's functionality.
 
 This is an extension of the :ref:`darcy_fno` chapter. The unique topics you will learn in this tutorial include:
 
-#. How to use the AFNO transformer architecture in Modulus Sym
+#. How to use the AFNO transformer architecture in PhysicsNeMo Sym
 
 #. Differences between AFNO transformer and the Fourier Neural Operator
 
 .. note::
 
-   This tutorial assumes that you are familiar with the basic functionality of Modulus Sym and understand the AFNO architecture.
+   This tutorial assumes that you are familiar with the basic functionality of PhysicsNeMo Sym and understand the AFNO architecture.
    Please see the :ref:`Introductory Example` and :ref:`afno` sections for additional information.
    Additionally, this tutorial builds upon the :ref:`darcy_fno` which should be read prior to this one.
 
@@ -51,7 +51,7 @@ The tokenized image is processed by the transformer layers followed by a linear 
 
 .. _fig-afno_darcy:
 
-.. figure:: /images/user_guide/afno_darcy.png
+.. figure:: ../../images/user_guide/afno_darcy.png
    :alt: AFNO surrogate model for 2D Darcy Flow
    :width: 75.0%
    :align: center
@@ -171,21 +171,21 @@ specified in the ``rec_results_freq`` parameter of its derivatives. See :ref:`hy
 The network directory folder (in this case ``'outputs/darcy_afno/validators'``) contains several plots of different 
 validation predictions.
 
-.. figure:: /images/user_guide/afno_darcy_pred1.png
+.. figure:: ../../images/user_guide/afno_darcy_pred1.png
    :alt: AFNO Darcy Prediction 1
    :width: 80.0%
    :align: center
 
    AFNO validation prediction 1. (Left to right) Input permeability, true pressure, predicted pressure, error.
 
-.. figure:: /images/user_guide/afno_darcy_pred2.png
+.. figure:: ../../images/user_guide/afno_darcy_pred2.png
    :alt: AFNO Darcy Prediction 2
    :width: 80.0%
    :align: center
 
    AFNO validation prediction 2. (Left to right) Input permeability, true pressure, predicted pressure, error.
 
-.. figure:: /images/user_guide/afno_darcy_pred3.png
+.. figure:: ../../images/user_guide/afno_darcy_pred3.png
    :alt: AFNO Darcy Prediction 3
    :width: 80.0%
    :align: center
@@ -193,7 +193,7 @@ validation predictions.
    AFNO validation prediction 3. (Left to right) Input permeability, true pressure, predicted pressure, error.
 
 It is important to recognize that AFNO's strengths lie in its ability to scale to a much larger model size and datasets than what is used in this chapter [#guibas2021adaptive]_ [#pathak2022fourcastnet]_. 
-While not illustrated here, this example demonstrates the fundamental implementation of data-driven training using the AFNO architecture in Modulus Sym for users to extend to larger problems.
+While not illustrated here, this example demonstrates the fundamental implementation of data-driven training using the AFNO architecture in PhysicsNeMo Sym for users to extend to larger problems.
 
 
 .. rubric:: References

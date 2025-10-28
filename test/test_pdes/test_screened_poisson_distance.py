@@ -16,8 +16,7 @@
 
 import numpy as np
 import torch
-import os
-from modulus.sym.eq.pdes.signed_distance_function import ScreenedPoissonDistance
+from physicsnemo.sym.eq.pdes.signed_distance_function import ScreenedPoissonDistance
 
 
 def test_screened_poisson_distance_equation():
@@ -26,7 +25,7 @@ def test_screened_poisson_distance_equation():
     y = np.random.rand(1024, 1)
     z = np.random.rand(1024, 1)
 
-    distance = np.exp(x + y + z)
+    np.exp(x + y + z)
     distance__x = np.exp(x + y + z)
     distance__y = np.exp(x + y + z)
     distance__z = np.exp(x + y + z)

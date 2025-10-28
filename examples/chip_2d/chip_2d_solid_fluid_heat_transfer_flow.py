@@ -20,29 +20,27 @@ import warnings
 import numpy as np
 from sympy import Symbol, Eq, And, Or
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
-from modulus.sym.utils.sympy.functions import parabola
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.eq.pdes.basic import NormalDotVec
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, PhysicsNeMoConfig
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
+from physicsnemo.sym.eq.pdes.navier_stokes import NavierStokes
+from physicsnemo.sym.eq.pdes.basic import NormalDotVec
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
     IntegralBoundaryConstraint,
 )
 
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.models.fourier_net import FourierNetArch
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.models.fourier_net import FourierNetArch
 
 
-@modulus.sym.main(config_path="conf_2d_solid_fluid", config_name="config_flow")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf_2d_solid_fluid", config_name="config_flow")
+def run(cfg: PhysicsNeMoConfig) -> None:
     #############
     # Real Params
     #############
@@ -72,9 +70,7 @@ def run(cfg: ModulusConfig) -> None:
     pressure_scale = mass_scale / (length_scale * time_scale**2)  # kg / (m s**2)
     density_scale = mass_scale / length_scale**3  # kg/m3
     watt_scale = (mass_scale * length_scale**2) / (time_scale**3)  # kg m**2 / s**3
-    joule_scale = (mass_scale * length_scale**2) / (
-        time_scale**2
-    )  # kg * m**2 / s**2
+    joule_scale = (mass_scale * length_scale**2) / (time_scale**2)  # kg * m**2 / s**2
 
     ##############################
     # Nondimensionalization Params
@@ -90,9 +86,7 @@ def run(cfg: ModulusConfig) -> None:
     nd_fluid_conductivity = fluid_conductivity / (
         watt_scale / (length_scale * temp_scale)
     )
-    nd_fluid_diffusivity = nd_fluid_conductivity / (
-        nd_fluid_specific_heat * nd_fluid_density
-    )
+    nd_fluid_conductivity / (nd_fluid_specific_heat * nd_fluid_density)
 
     # copper params
     nd_copper_density = copper_density / (mass_scale / length_scale**3)
@@ -102,14 +96,12 @@ def run(cfg: ModulusConfig) -> None:
     nd_copper_conductivity = copper_conductivity / (
         watt_scale / (length_scale * temp_scale)
     )
-    nd_copper_diffusivity = nd_copper_conductivity / (
-        nd_copper_specific_heat * nd_copper_density
-    )
+    nd_copper_conductivity / (nd_copper_specific_heat * nd_copper_density)
 
     # boundary params
     nd_inlet_velocity = inlet_velocity / (length_scale / time_scale)
-    nd_inlet_temp = inlet_temp / temp_scale
-    nd_copper_source_grad = copper_heat_flux * length_scale / temp_scale
+    inlet_temp / temp_scale
+    copper_heat_flux * length_scale / temp_scale
 
     # make list of nodes to unroll graph on
     ns = NavierStokes(
@@ -136,7 +128,7 @@ def run(cfg: ModulusConfig) -> None:
     chip_width = 1.0
 
     # define sympy variables to parametrize domain curves
-    x, y = Symbol("x"), Symbol("y")
+    x, _y = Symbol("x"), Symbol("y")
 
     # define geometry
     channel = Channel2D(
@@ -275,7 +267,7 @@ def run(cfg: ModulusConfig) -> None:
         domain.add_validator(openfoam_validator)
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # make solver

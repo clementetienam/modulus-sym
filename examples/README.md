@@ -1,5 +1,5 @@
 <!-- markdownlint-disable MD043 -->
-# NVIDIA Modulus Sym Examples
+# NVIDIA PhysicsNeMo Sym Examples
 
 ## Introduction
 
@@ -17,13 +17,14 @@ such models can help solve real world problems.
 |[Spring-mass system ODE](./ode_spring_mass/)| Fully Connected MLP PINN |Introductory|Steady state, Multi-GPU|
 |[Surface PDE](./surface_pde/)| Fully Connected MLP PINN |Introductory|Steady state, Multi-GPU|
 
-## Turbulence
+## Fluid Dynamics
 
-|Use case|Model|Level|Attributes|
-| --- | --- | --- | --- |
-|[Taylor-Green](./taylor_green/)| Fully Connected MLP PINN | Intermediate |Steady state, Multi-GPU|
-|[Turbulent channel](./turbulent_channel/)| Fourier Feature MLP PINN |Intermediate|Steady state, Multi-GPU|
-|[Turbulent super-resolution](./super_resolution/)| Super Resolution Network, Pix2Pix |Intermediate|Steady state, Multi-GPU|
+| Use case                                          | Model                             | Level        | Attributes         |
+|---------------------------------------------------|-----------------------------------|--------------|--------------------|
+| [Taylor-Green](./taylor_green/)                   | Fully Connected MLP PINN          | Intermediate | Steady state, Multi-GPU |
+| [Turbulent channel](./turbulent_channel/)         | Fourier Feature MLP PINN          | Intermediate | Steady state, Multi-GPU |
+| [Turbulent super-resolution](./super_resolution/) | Super Resolution Network, Pix2Pix | Intermediate | Steady state, Multi-GPU | 
+| [Airfoil Aerodynamics](./airfoil_pinn/)           | Fully Connected MLP PINN          | Intermediate | Steady state       |
 
 ## Electromagnetics
 
@@ -63,7 +64,7 @@ such models can help solve real world problems.
 ## Additional examples
 
 In addition to the examples in this repo, more Physics-ML usecases and examples
-can be referenced from the [Modulus examples](https://github.com/NVIDIA/modulus/blob/main/examples/README.md).
+can be referenced from the [PhysicsNeMo examples](https://github.com/NVIDIA/physicsnemo/blob/main/examples/README.md).
 
 ## NVIDIA support
 
@@ -75,5 +76,5 @@ For stable examples, please refer the tagged versions.
 
 We're posting these examples on GitHub to better support the community, facilitate
 feedback, as well as collect and implement contributions using
-[GitHub issues](https://github.com/NVIDIA/modulus-launch/issues) and pull requests.
+[GitHub issues](https://github.com/NVIDIA/physicsnemo-sym/issues) and pull requests.
 We welcome all contributions!

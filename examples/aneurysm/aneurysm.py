@@ -21,26 +21,26 @@ import torch
 import numpy as np
 from sympy import Symbol, sqrt, Max
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
     IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.key import Key
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.eq.pdes.basic import NormalDotVec
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.geometry.tessellation import Tessellation
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.navier_stokes import NavierStokes
+from physicsnemo.sym.eq.pdes.basic import NormalDotVec
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.geometry.tessellation import Tessellation
 
 
-@modulus.sym.main(config_path="conf", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # read stl files to make geometry
     point_path = to_absolute_path("./stl_files")
     inlet_mesh = Tessellation.from_stl(
@@ -104,9 +104,8 @@ def run(cfg: ModulusConfig) -> None:
     inlet_area = 21.1284 * (scale**2)
     inlet_center = (-4.24298030045776, 4.082857101816247, -4.637790193399717)
     inlet_radius = np.sqrt(inlet_area / np.pi)
-    outlet_normal = (0.33179, 0.43424, 0.83747)
     outlet_area = 12.0773 * (scale**2)
-    outlet_radius = np.sqrt(outlet_area / np.pi)
+    np.sqrt(outlet_area / np.pi)
 
     # make aneurysm domain
     domain = Domain()
@@ -191,7 +190,7 @@ def run(cfg: ModulusConfig) -> None:
         integral_batch_size=cfg.batch_size.integral_continuity,
         lambda_weighting={"normal_dot_vel": 0.1},
     )
-    domain.add_constraint(integral_continuity, "integral_continuity_1")
+    domain.add_constraint(integral_continuity, "integral_continuity_2")
 
     # add validation data
     file_path = "./openfoam/aneurysm_parabolicInlet_sol0.csv"
@@ -224,7 +223,7 @@ def run(cfg: ModulusConfig) -> None:
         domain.add_validator(openfoam_validator)
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # add pressure monitor

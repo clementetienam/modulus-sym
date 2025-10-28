@@ -16,8 +16,7 @@
 
 import numpy as np
 import torch
-import os
-from modulus.sym.eq.pdes.wave_equation import WaveEquation, HelmholtzEquation
+from physicsnemo.sym.eq.pdes.wave_equation import WaveEquation, HelmholtzEquation
 
 
 def test_wave_equation():
@@ -27,7 +26,7 @@ def test_wave_equation():
     z = np.random.rand(1024, 1)
     t = np.random.rand(1024, 1)
 
-    u = np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
+    np.sin(x) * np.sin(y) * np.sin(z) * np.cos(t)
 
     c = 0.1
 

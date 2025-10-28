@@ -15,14 +15,15 @@
 # limitations under the License.
 
 """Defines the FCN architecture"""
+
 import logging
 import torch
 from torch import Tensor
 from typing import List, Tuple, Dict
 
-from modulus.sym.models.afno.afno import AFNONet
-from modulus.sym.models.arch import Arch
-from modulus.sym.key import Key
+from physicsnemo.sym.models.afno.afno import AFNONet
+from physicsnemo.sym.models.arch import Arch
+from physicsnemo.sym.key import Key
 
 
 class FourcastNetArch(Arch):
@@ -39,7 +40,7 @@ class FourcastNetArch(Arch):
         depth: int = 4,
         num_blocks: int = 4,
     ) -> None:
-        """Fourcastnet model. This is a simple wrapper for Modulus' AFNO model.
+        """Fourcastnet model. This is a simple wrapper for PhysicsNeMo' AFNO model.
         The only difference is that FourcastNet needs multi-step training. This class
         allows the model to auto-regressively predict multiple timesteps
 
@@ -69,9 +70,9 @@ class FourcastNetArch(Arch):
         )
 
         # get number of timesteps steps to unroll
-        assert (
-            len(self.input_keys) == 1
-        ), "Error, FourcastNet only accepts one input variable (x_t0)"
+        assert len(self.input_keys) == 1, (
+            "Error, FourcastNet only accepts one input variable (x_t0)"
+        )
         self.n_tsteps = len(self.output_keys)
         logging.info(f"Unrolling FourcastNet over {self.n_tsteps} timesteps")
 

@@ -16,17 +16,17 @@
 
 import torch
 from sympy import Symbol, Eq, cos, sin, pi
-from modulus.sym.node import Node
-from modulus.sym.geometry.primitives_2d import Rectangle
-from modulus.sym.geometry.primitives_3d import Plane
-from modulus.sym.domain.constraint import (
+from physicsnemo.sym.node import Node
+from physicsnemo.sym.geometry.primitives_2d import Rectangle
+from physicsnemo.sym.geometry.primitives_3d import Plane
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
     IntegralBoundaryConstraint,
     VariationalDomainConstraint,
 )
-from modulus.sym.loss import Loss
-from modulus.sym.geometry.parameterization import Parameterization, Bounds
+from physicsnemo.sym.loss import Loss
+from physicsnemo.sym.geometry.parameterization import Parameterization, Bounds
 
 # TODO: Add some more complex geometery that is the union of multiple shapes to check boundary sampling
 
@@ -36,7 +36,6 @@ def test_PointwiseBoundaryConstraint():
 
     ntests = 10
     for fixed_dataset in [True, False]:
-
         # define sinusodial node
         x, y = Symbol("x"), Symbol("y")
         node = Node.from_sympy(cos(x) + sin(y), "u")
@@ -93,7 +92,6 @@ def test_PointwiseBoundaryConstraint():
         height = float(height)
         width = float(width)
         for _ in range(ntests):
-
             # check losses are zero
             top_wall.load_data()
             top_wall.forward()
@@ -146,7 +144,6 @@ def test_PointwiseInteriorConstraint():
 
     ntests = 10
     for fixed_dataset in [True, False]:
-
         # define sinusodial node
         x, y = Symbol("x"), Symbol("y")
         node = Node.from_sympy(cos(x) + sin(y), "u")
@@ -169,7 +166,6 @@ def test_PointwiseInteriorConstraint():
         height = float(height)
         width = float(width)
         for _ in range(ntests):
-
             # check loss is zero
             constraint.load_data()
             constraint.forward()
@@ -187,7 +183,6 @@ def test_IntegralBoundaryConstraint():
 
     ntests = 10
     for fixed_dataset in [True, False]:
-
         # define parabola node
         node = Node.from_sympy(Symbol("z") ** 2, "u")
 
@@ -285,7 +280,6 @@ def test_VariationalDomainConstraint():
 
 
 if __name__ == "__main__":
-
     test_PointwiseBoundaryConstraint()
 
     test_PointwiseInteriorConstraint()

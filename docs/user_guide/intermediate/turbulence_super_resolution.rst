@@ -6,24 +6,24 @@ Turbulence Super Resolution
 Introduction
 ------------
 
-This example uses Modulus Sym to train a super-resolution surrogate model for predicting high-fidelity homogeneous isotropic turbulence fields from filtered low-resolution observations provided by the `Johns Hopkins Turbulence Database <http://turbulence.pha.jhu.edu/>`_.
+This example uses PhysicsNeMo Sym to train a super-resolution surrogate model for predicting high-fidelity homogeneous isotropic turbulence fields from filtered low-resolution observations provided by the `Johns Hopkins Turbulence Database <http://turbulence.pha.jhu.edu/>`_.
 This model will combine standard data-driven learning as well as how to define custom data-driven loss functions that are uniquely catered to a specific problem.
 In this example you will learn the following:
 
-#. How to use data-driven convolutional neural network models in Modulus Sym
+#. How to use data-driven convolutional neural network models in PhysicsNeMo Sym
 
 #. How to define custom data-driven loss and constraint
 
 #. How to define custom data-driven validator
 
-#. Modulus Sym features for structured/grid data
+#. PhysicsNeMo Sym features for structured/grid data
 
 #. Adding custom parameters to the problem configuration file
 
 .. note:: 
 
-   This tutorial assumes that you have completed the :ref:`Introductory Example` tutorial on Lid Driven Cavity flow and have familiarized yourself with the basics of Modulus Sym. 
-   This also assumes that you have a basic understanding of the convolution models in Modulus Sym :ref:`pix2pix` and :ref:`super_res`.
+   This tutorial assumes that you have completed the :ref:`Introductory Example` tutorial on Lid Driven Cavity flow and have familiarized yourself with the basics of PhysicsNeMo Sym. 
+   This also assumes that you have a basic understanding of the convolution models in PhysicsNeMo Sym :ref:`pix2pix` and :ref:`super_res`.
 
 .. warning::
 
@@ -44,7 +44,7 @@ This simulation solves the forced Navier-Stokes equations:
 The forcing term :math:`\textbf{f}` is used to inject energy into the simulation to maintain a constant total energy. 
 This dataset contains 5028 time steps spanning from 0 to 10.05 seconds which are sampled every 10 time steps from the original pseudo-spectral simulation.
 
-.. figure:: /images/user_guide/super_res_dataset_sample.png
+.. figure:: ../../images/user_guide/super_res_dataset_sample.png
    :alt: Isotropic turbulence velocity field snap shot
    :width: 70.0%
    :align: center
@@ -56,7 +56,7 @@ The objective is to build a surrogate model to learn the mapping between a low-r
 Due to the size of the full simulation domain, this tutorial focuses on predicting smaller volumes such that the surrogate learns with a low resolution dimensionality of :math:`32^{3}` to a high-resolution dimensionality of :math:`128^{3}`.
 Use the :ref:`super_res` in this tutorial, but :ref:`pix2pix` is also integrated into this problem and can be used instead if desired.
 
-.. figure:: /images/user_guide/super_res_surrogate.png
+.. figure:: ../../images/user_guide/super_res_surrogate.png
    :alt: Isotropic turbulence velocity field snap shot
    :width: 70.0%
    :align: center
@@ -67,7 +67,7 @@ Writing a Custom Data-Driven Constraint
 ---------------------------------------
 
 This example demonstrates how to write your own data-driven constraint.
-Modulus Sym ships with a standard supervised learning constraint for structured data called ``SupervisedGridConstraint`` used in the :ref:`darcy_fno` example.
+PhysicsNeMo Sym ships with a standard supervised learning constraint for structured data called ``SupervisedGridConstraint`` used in the :ref:`darcy_fno` example.
 However, if you want to have a problem specific loss you can extend the base ``GridConstraint``.
 Here, you will set up a constraint that can pose a loss between various measures for the fluid flow including velocity, continuity, vorticity, enstrophy and strain rate. 
 
@@ -107,14 +107,14 @@ All of these can be turned on and off in the configuration file under the ``cust
 Writing a Custom Data-Driven Validator
 ---------------------------------------
 
-Similarly, because the input and output are of different dimensionality, the built in ``GridValidator`` in Modulus Sym will not work since it expects all tensors to be the same size.
+Similarly, because the input and output are of different dimensionality, the built in ``GridValidator`` in PhysicsNeMo Sym will not work since it expects all tensors to be the same size.
 You can easily extend this to write out the high-resolution outputs and low-resolution outputs into separate VTK uniform grid files.
 
 .. literalinclude:: ../../../examples/super_resolution/super_resolution.py
    :language: python
    :lines: 214-297
 
-Here the ``grid_to_vtk`` function in Modulus Sym is used, which writes tensor data to VTK Image Datasets (Uniform grids), which can then be viewed in Paraview. 
+Here the ``grid_to_vtk`` function in PhysicsNeMo Sym is used, which writes tensor data to VTK Image Datasets (Uniform grids), which can then be viewed in Paraview. 
 When your data is structured ``grid_to_vtk`` is preferred to ``var_to_polyvtk`` due to the lower memory footprint of a VTK Image Dataset vs VTK Poly Dataset.
 
 Case Setup
@@ -142,7 +142,7 @@ The config file for this example is as follows. Note that both the super-resolut
 .. literalinclude:: ../../../examples/super_resolution/conf/config.yaml
    :language: yaml
 
-The ``custom`` config group can be used to store case specific parameters that will not be used inside of Modulus Sym.
+The ``custom`` config group can be used to store case specific parameters that will not be used inside of PhysicsNeMo Sym.
 Here you can use this group to define parameters related to the dataset size, the domain size of the fluid volumes and the database  access token which you should replace with your own!
 
 .. note::
@@ -171,8 +171,8 @@ This will download and cache the dataset locally, so you will not need to downlo
 Initializing the Model
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Here you initialize the model following the standard Modulus Sym process.
-Note that the input and output keys have a ``size=3``, which tells Modulus Sym that these variables have 3 dimensions (velocity components).
+Here you initialize the model following the standard PhysicsNeMo Sym process.
+Note that the input and output keys have a ``size=3``, which tells PhysicsNeMo Sym that these variables have 3 dimensions (velocity components).
 
 .. literalinclude:: ../../../examples/super_resolution/super_resolution.py
    :language: python
@@ -227,7 +227,7 @@ You can see that the inclusion of vorticity in the loss equation increases the m
 Loss combinations of additional fluid measures has proven successful in past works [#geneva2020multi]_ [#subramaniam2020turbulence]_. 
 However, additional losses can potentially make the optimization more difficult for the model and adversely impact accuracy.
 
-.. figure:: /images/user_guide/super_res_tensorboard.png
+.. figure:: ../../images/user_guide/super_res_tensorboard.png
    :alt: Turbulence super-resolution tensorboard
    :width: 75.0%
    :align: center
@@ -238,14 +238,14 @@ However, additional losses can potentially make the optimization more difficult 
 The output VTK files can be found in the ``'outputs/super_resolution/validators'`` folder which you can then view in Paraview.
 The volumetric plots of the velocity magnitude fields are shown below where you can see the model dramatically improves the low-resolution velocity field.
 
-.. figure:: /images/user_guide/super_res_validation_0.png
+.. figure:: ../../images/user_guide/super_res_validation_0.png
     :alt: Validation volumetric plot
     :width: 80.0%
     :align: center
     
     Velocity magnitude for a validation case using the super resolution model for predicting turbulence
 
-.. figure:: /images/user_guide/super_res_validation_1.png
+.. figure:: ../../images/user_guide/super_res_validation_1.png
     :alt: Validation volumetric plot
     :width: 80.0%
     :align: center

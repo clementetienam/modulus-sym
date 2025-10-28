@@ -26,6 +26,7 @@ Geostatistics packages are also provided
 @Author: Clement Etienam
 
 """
+
 print(".........................IMPORT SOME LIBRARIES.....................")
 import os
 import numpy as np
@@ -95,10 +96,8 @@ import matplotlib.lines as mlines
 
 # os.environ['KERAS_BACKEND'] = 'tensorflow'
 import os.path
-import time
 import random
 import os.path
-from datetime import timedelta
 
 # import dolfin as df
 import sys
@@ -108,7 +107,6 @@ import numpy.linalg
 from numpy.linalg import norm
 from scipy.fftpack.realtransforms import idct
 import numpy.ma as ma
-from matplotlib.font_manager import FontProperties
 import logging
 import os
 import matplotlib as mpl
@@ -127,7 +125,6 @@ print("Cpu info")
 for k, v in s.items():
     print(f"\t{k}: {v}")
 cores = multiprocessing.cpu_count()
-import math
 
 logger = logging.getLogger(__name__)
 # numpy.random.seed(99)
@@ -207,7 +204,6 @@ def check_cupy_sparse_matrix(A):
 
 
 def Plot_RSM_percentile(pertoutt, True_mat, Namesz):
-
     timezz = True_mat[:, 0].reshape(-1, 1)
 
     P10 = pertoutt
@@ -400,7 +396,6 @@ def Plot_RSM_percentile(pertoutt, True_mat, Namesz):
 
 
 def Plot_RSM_percentile2(pertoutt, P12, True_mat, Namesz):
-
     timezz = True_mat[:, 0].reshape(-1, 1)
 
     P10 = pertoutt
@@ -565,7 +560,6 @@ def Plot_RSM_percentile2(pertoutt, P12, True_mat, Namesz):
 def Plot_performance(
     PINN, PINN2, trueF, nx, ny, namet, UIR, itt, dt, MAXZ, pini_alt, steppi, wells
 ):
-
     look = (PINN[itt, :, :]) * pini_alt
     look_sat = PINN2[itt, :, :]
     look_oil = 1 - look_sat
@@ -1253,35 +1247,34 @@ def smoothn(
     TolZ=1e-3,
     weightstr="bisquare",
 ):
-
     if type(y) == ma.core.MaskedArray:  # masked array
         # is_masked = True
         mask = y.mask
         y = np.array(y)
         y[mask] = 0.0
-        if np.any(W != None):
+        if np.any(W is not None):
             W = np.array(W)
             W[mask] = 0.0
-        if np.any(sd != None):
+        if np.any(sd is not None):
             W = np.array(1.0 / sd**2)
             W[mask] = 0.0
             sd = None
         y[mask] = np.nan
 
-    if np.any(sd != None):
+    if np.any(sd is not None):
         sd_ = np.array(sd)
         mask = sd > 0.0
         W = np.zeros_like(sd_)
         W[mask] = 1.0 / sd_[mask] ** 2
         sd = None
 
-    if np.any(W != None):
+    if np.any(W is not None):
         W = W / W.max()
 
     sizy = y.shape
 
     # sort axis
-    if axis == None:
+    if axis is None:
         axis = tuple(np.arange(y.ndim))
 
     noe = y.size  # number of elements
@@ -1294,7 +1287,7 @@ def smoothn(
     # Smoothness parameter and weights
     # if s != None:
     #  s = []
-    if np.all(W == None):
+    if np.all(W is None):
         W = np.ones(sizy)
 
     # if z0 == None:
@@ -1399,7 +1392,7 @@ def smoothn(
         # purpose, a nearest neighbor interpolation followed by a coarse
         # smoothing are performed.
         # ---
-        if z0 != None:  # an initial guess (z0) has been provided
+        if z0 is not None:  # an initial guess (z0) has been provided
             z = z0
         else:
             z = y  # InitialGuess(y,IsFinite);
@@ -1677,7 +1670,7 @@ def peaks(n):
         f = np.exp(
             -(((x - x0) / sdx) ** 2)
             - ((y - y0) / sdy) ** 2
-            - (((x - x0) / sdx)) * ((y - y0) / sdy) * c
+            - ((x - x0) / sdx) * ((y - y0) / sdy) * c
         )
         # f /= f.sum()
         f *= random()
@@ -1805,7 +1798,6 @@ def ShowBar(Bar):
 
 
 def Equivalent_time(tim1, max_t1, tim2, max_t2):
-
     tk2 = tim1 / max_t1
     tc2 = np.arange(0.0, 1 + tk2, tk2)
     tc2[tc2 >= 1] = 1
@@ -1864,7 +1856,6 @@ def No_Sim(
     input_channel,
     pena,
 ):
-
     paramss = ini
     Ne = paramss.shape[1]
 
@@ -2062,7 +2053,6 @@ def Add_marker2(plt, XX, YY, injectors, producers):
 
 
 def Plot_2D(XX, YY, plt, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producers):
-
     Pressz = np.reshape(Truee, (nx, ny, nz), "F")
     maxii = max(Pressz.ravel())
     minii = min(Pressz.ravel())
@@ -2079,21 +2069,23 @@ def Plot_2D(XX, YY, plt, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, prod
     if varii == "perm":
         cbar.set_label("Log K(mD)", fontsize=11)
         plt.title("Permeability Field with well locations", fontsize=11, weight="bold")
-    elif varii == "water Modulus":
+    elif varii == "water PhysicsNeMo":
         cbar.set_label("water saturation", fontsize=11)
-        plt.title("water saturation -Modulus", fontsize=11, weight="bold")
+        plt.title("water saturation -PhysicsNeMo", fontsize=11, weight="bold")
     elif varii == "water Numerical":
         cbar.set_label("water saturation", fontsize=11)
         plt.title("water saturation - Numerical", fontsize=11, weight="bold")
     elif varii == "water diff":
         cbar.set_label("unit", fontsize=11)
         plt.title(
-            "water saturation - (Numerical(GPU) -Modulus)", fontsize=11, weight="bold"
+            "water saturation - (Numerical(GPU) -PhysicsNeMo)",
+            fontsize=11,
+            weight="bold",
         )
 
-    elif varii == "oil Modulus":
+    elif varii == "oil PhysicsNeMo":
         cbar.set_label("Oil saturation", fontsize=11)
-        plt.title("Oil saturation -Modulus", fontsize=11, weight="bold")
+        plt.title("Oil saturation -PhysicsNeMo", fontsize=11, weight="bold")
 
     elif varii == "oil Numerical":
         cbar.set_label("Oil saturation", fontsize=11)
@@ -2102,12 +2094,12 @@ def Plot_2D(XX, YY, plt, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, prod
     elif varii == "oil diff":
         cbar.set_label("unit", fontsize=11)
         plt.title(
-            "oil saturation - (Numerical(GPU) -Modulus)", fontsize=11, weight="bold"
+            "oil saturation - (Numerical(GPU) -PhysicsNeMo)", fontsize=11, weight="bold"
         )
 
-    elif varii == "pressure Modulus":
+    elif varii == "pressure PhysicsNeMo":
         cbar.set_label("pressure(psia)", fontsize=11)
-        plt.title("Pressure -Modulus", fontsize=11, weight="bold")
+        plt.title("Pressure -PhysicsNeMo", fontsize=11, weight="bold")
 
     elif varii == "pressure Numerical":
         cbar.set_label("pressure(psia)", fontsize=11)
@@ -2115,7 +2107,9 @@ def Plot_2D(XX, YY, plt, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, prod
 
     elif varii == "pressure diff":
         cbar.set_label("unit", fontsize=11)
-        plt.title("Pressure - (Numerical(GPU) -Modulus)", fontsize=11, weight="bold")
+        plt.title(
+            "Pressure - (Numerical(GPU) -PhysicsNeMo)", fontsize=11, weight="bold"
+        )
 
     elif varii == "porosity":
         cbar.set_label("porosity", fontsize=11)
@@ -2130,7 +2124,7 @@ def Plot_2D(XX, YY, plt, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, prod
     Add_marker2(plt, XX, YY, injectors, producers)
 
 
-def Plot_Modulus(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producers):
+def Plot_PhysicsNeMo(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producers):
     # matplotlib.use('Agg')
     Pressz = np.reshape(Truee, (nx, ny, nz), "F")
 
@@ -2271,21 +2265,23 @@ def Plot_Modulus(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producer
         ax.set_title(
             "Permeability Field with well locations", fontsize=12, weight="bold"
         )
-    elif varii == "water Modulus":
+    elif varii == "water PhysicsNeMo":
         cbar.set_label("water saturation", fontsize=12)
-        ax.set_title("water saturation -Modulus", fontsize=12, weight="bold")
+        ax.set_title("water saturation -PhysicsNeMo", fontsize=12, weight="bold")
     elif varii == "water Numerical":
         cbar.set_label("water saturation", fontsize=12)
         ax.set_title("water saturation - Numerical(GPU)", fontsize=12, weight="bold")
     elif varii == "water diff":
         cbar.set_label("unit", fontsize=12)
         ax.set_title(
-            "water saturation - (Numerical(GPU) -Modulus))", fontsize=12, weight="bold"
+            "water saturation - (Numerical(GPU) -PhysicsNeMo))",
+            fontsize=12,
+            weight="bold",
         )
 
-    elif varii == "oil Modulus":
+    elif varii == "oil PhysicsNeMo":
         cbar.set_label("Oil saturation", fontsize=12)
-        ax.set_title("Oil saturation -Modulus", fontsize=12, weight="bold")
+        ax.set_title("Oil saturation -PhysicsNeMo", fontsize=12, weight="bold")
 
     elif varii == "oil Numerical":
         cbar.set_label("Oil saturation", fontsize=12)
@@ -2294,12 +2290,14 @@ def Plot_Modulus(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producer
     elif varii == "oil diff":
         cbar.set_label("unit", fontsize=12)
         ax.set_title(
-            "oil saturation - (Numerical(GPU) -Modulus))", fontsize=12, weight="bold"
+            "oil saturation - (Numerical(GPU) -PhysicsNeMo))",
+            fontsize=12,
+            weight="bold",
         )
 
-    elif varii == "pressure Modulus":
+    elif varii == "pressure PhysicsNeMo":
         cbar.set_label("pressure", fontsize=12)
-        ax.set_title("Pressure -Modulus", fontsize=12, weight="bold")
+        ax.set_title("Pressure -PhysicsNeMo", fontsize=12, weight="bold")
 
     elif varii == "pressure Numerical":
         cbar.set_label("pressure", fontsize=12)
@@ -2308,7 +2306,7 @@ def Plot_Modulus(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producer
     elif varii == "pressure diff":
         cbar.set_label("unit", fontsize=12)
         ax.set_title(
-            "Pressure - (Numerical(GPU) -Modulus))", fontsize=12, weight="bold"
+            "Pressure - (Numerical(GPU) -PhysicsNeMo))", fontsize=12, weight="bold"
         )
 
     elif varii == "porosity":
@@ -2318,7 +2316,6 @@ def Plot_Modulus(ax, nx, ny, nz, Truee, N_injw, N_pr, varii, injectors, producer
 
 
 def plot3d2(arr_3d, nx, ny, nz, itt, dt, MAXZ, namet, titti, maxii, minii):
-
     """
     Plot a 3D array with matplotlib and annotate specific points on the plot.
 
@@ -3504,7 +3501,6 @@ def Plot_Models(True_mat):
 
 
 def Plot_bar(True_mat):
-
     a1 = rmsee(True_mat[1][:, 1:].ravel(), True_mat[0][:, 1:].ravel())
     a2 = rmsee(True_mat[2][:, 1:].ravel(), True_mat[0][:, 1:].ravel())
     a3 = rmsee(True_mat[3][:, 1:].ravel(), True_mat[0][:, 1:].ravel())

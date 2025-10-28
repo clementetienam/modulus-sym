@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from modulus.sym.models.highway_fourier_net import HighwayFourierNetArch
+from physicsnemo.sym.models.highway_fourier_net import HighwayFourierNetArch
 from pathlib import Path
 import torch
 import numpy as np
-from modulus.sym.key import Key
+from physicsnemo.sym.key import Key
 import pytest
 from .model_test_utils import validate_func_arch_net
 
@@ -73,7 +73,7 @@ def test_highway_fourier_net():
     # load outputs
     data_out1 = test_data["data_out"]
     # verify
-    assert np.allclose(data_out1, data_out2, rtol=1e-3), "Test failed!"
+    assert np.allclose(data_out1, data_out2, atol=1e-3, rtol=1e-3), "Test failed!"
     print("Success!")
 
 

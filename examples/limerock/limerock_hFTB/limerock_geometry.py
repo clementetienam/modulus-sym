@@ -14,12 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# import Modulus library
-from sympy import Symbol, Eq, tanh, Max
+# import PhysicsNeMo library
+from sympy import Symbol
 import numpy as np
-import itertools
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.geometry import Parameterization, Parameter
+from physicsnemo.sym.geometry.primitives_3d import Box, Channel, Plane
+from physicsnemo.sym.geometry import Parameterization, Parameter
 
 
 class LimeRock(object):
@@ -75,7 +74,6 @@ class LimeRock(object):
     def _parse_file(self, filename):
         # Read file
         reader = open(filename)
-        sdf = 0
         while True:
             line = reader.readline()
             if "solid" == line.split(" ")[0]:
@@ -120,7 +118,6 @@ class LimeRock(object):
             elif "endsolid" == split_line[0]:
                 break
             elif "facet" == split_line[0]:
-                curve = {}
                 # read outer loop line
                 _ = reader.readline()
                 # read 3 vertices

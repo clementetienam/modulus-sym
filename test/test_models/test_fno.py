@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
 import torch
 
-from modulus.sym.key import Key
-from modulus.sym.models.fno import FNOArch
-from modulus.sym.models.fully_connected import FullyConnectedArch
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.models.fno import FNOArch
+from physicsnemo.sym.models.fully_connected import FullyConnectedArch
+
 
 ########################
 # load & verify

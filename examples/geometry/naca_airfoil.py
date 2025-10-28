@@ -14,15 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
-import matplotlib.pyplot as plt
 import numpy as np
-from sympy import Number, Symbol, Heaviside, atan, sin, cos, sqrt
-import os
+from sympy import Heaviside, atan, sin, cos, sqrt
 
-from modulus.sym.geometry.primitives_2d import Polygon
-from modulus.sym.geometry.parameterization import Parameterization, Parameter
-from modulus.sym.utils.io.vtk import var_to_polyvtk
+from physicsnemo.sym.geometry.primitives_2d import Polygon
+from physicsnemo.sym.utils.io.vtk import var_to_polyvtk
 
 
 # Naca implementation modified from https://stackoverflow.com/questions/31815041/plotting-a-naca-4-series-airfoil

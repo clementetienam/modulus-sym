@@ -16,12 +16,10 @@
 
 # Import libraries
 import torch
-from torch import nn
-from typing import Dict, List
+from typing import Dict
 
-# Import from Modulus
-from modulus.sym.eq.derivatives import gradient
-from modulus.sym.loss.aggregator import Aggregator
+# Import from PhysicsNeMo
+from physicsnemo.sym.loss.aggregator import Aggregator
 
 
 class CustomSum(Aggregator):

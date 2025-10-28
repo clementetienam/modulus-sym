@@ -14,31 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import modulus.sym
-from modulus.sym.hydra import instantiate_arch, ModulusConfig
-from modulus.sym.key import Key
+import physicsnemo.sym
+from physicsnemo.sym.hydra import instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.key import Key
 
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.models.deeponet import DeepONetArch
-from modulus.sym.models.fourier_net import FourierNetArch
-from modulus.sym.models.pix2pix import Pix2PixArch
-from modulus.sym.domain.constraint.continuous import DeepONetConstraint
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.validator import GridValidator
-from modulus.sym.dataset import DictGridDataset
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.domain.constraint.continuous import DeepONetConstraint
+from physicsnemo.sym.domain.validator import PointwiseValidator
 
-from modulus.sym.utils.io.plotter import GridValidatorPlotter
 
 from utilities import download_FNO_dataset, load_deeponet_dataset
 
 
-@modulus.sym.main(config_path="conf", config_name="config_DeepO")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="config_DeepO")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # [datasets]
     # load training/ test data
     branch_input_keys = [Key("coeff")]
-    trunk_input_keys = [Key("x"), Key("y")]
+    [Key("x"), Key("y")]
     output_keys = [Key("sol")]
 
     download_FNO_dataset("Darcy_241", outdir="datasets/")

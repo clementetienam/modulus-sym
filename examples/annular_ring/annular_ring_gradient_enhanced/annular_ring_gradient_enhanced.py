@@ -14,45 +14,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" References: 
-(1) "Son, H., Jang, J.W., Han, W.J. and Hwang, H.J., 2021. 
-Sobolev training for the neural network solutions of pdes. 
+"""References:
+(1) "Son, H., Jang, J.W., Han, W.J. and Hwang, H.J., 2021.
+Sobolev training for the neural network solutions of pdes.
 arXiv preprint arXiv:2101.08932."
-(2) Yu, J., Lu, L., Meng, X. and Karniadakis, G.E., 2021. 
-Gradient-enhanced physics-informed neural networks for forward 
+(2) Yu, J., Lu, L., Meng, X. and Karniadakis, G.E., 2021.
+Gradient-enhanced physics-informed neural networks for forward
 and inverse PDE problems. arXiv preprint arXiv:2111.02801.
 """
+
 import os
 import warnings
 
 from sympy import Symbol, Eq, And
 import torch
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry import Bounds
-from modulus.sym.geometry.primitives_2d import Rectangle, Circle
-from modulus.sym.utils.sympy.functions import parabola
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.geometry import Bounds
+from physicsnemo.sym.geometry.primitives_2d import Rectangle, Circle
+from physicsnemo.sym.utils.sympy.functions import parabola
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
     IntegralBoundaryConstraint,
 )
 
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.inferencer import PointwiseInferencer
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.eq.pdes.basic import NormalDotVec
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.domain.inferencer import PointwiseInferencer
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.basic import NormalDotVec
 from pdes.navier_stokes import NavierStokes
 
 
-@modulus.sym.main(config_path="conf", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # make list of nodes to unroll graph on
     ns = NavierStokes(nu=0.01, rho=1.0, dim=2, time=False)
     normal_dot_vel = NormalDotVec(["u", "v"])
@@ -198,7 +198,7 @@ def run(cfg: ModulusConfig) -> None:
         domain.add_inferencer(grid_inference, "inf_data")
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # add monitors

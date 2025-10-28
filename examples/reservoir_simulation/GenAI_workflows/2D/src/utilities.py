@@ -16,6 +16,7 @@
 """
 @Author : Clement Etienam
 """
+
 import os
 import zipfile
 
@@ -28,7 +29,7 @@ import scipy.io
 import numpy as np
 import h5py
 
-from modulus.sym.hydra import to_absolute_path
+from physicsnemo.sym.hydra import to_absolute_path
 
 # list of FNO dataset url ids on drive: https://drive.google.com/drive/folders/1UnbQh2WWc6knEHbLn-ZaXrKUZhp7pjt-
 _FNO_datatsets_ids = {
@@ -65,7 +66,6 @@ def load_FNO_dataset(path, input_keys, output_keys, n_examples=None):
     invar, outvar = dict(), dict()
     for d, keys in [(invar, input_keys), (outvar, output_keys)]:
         for k in keys:
-
             # get data
             x = data[k]  # N, C, H, W
 
@@ -104,7 +104,6 @@ def load_FNO_dataset2(path, input_keys, output_keys, output_keys2, n_examples=No
         (outvar2, output_keys2),
     ]:
         for k in keys:
-
             # get data
             x = data[k]  # N, C, H, W
 
@@ -139,7 +138,6 @@ def load_FNO_dataset4(path, input_keys, n_examples=None):
     invar = dict()
     for d, keys in [(invar, input_keys)]:
         for k in keys:
-
             # get data
             x = data[k]  # N, C, H, W
 

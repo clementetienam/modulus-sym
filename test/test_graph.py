@@ -14,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
 import torch
-from typing import Dict, List, Optional
-from modulus.sym.key import Key
-from modulus.sym.constants import diff
-from modulus.sym.node import Node
-from modulus.sym.graph import Graph
-from modulus.sym.eq.derivatives import MeshlessFiniteDerivative
+from typing import Dict, List
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.constants import diff
+from physicsnemo.sym.node import Node
+from physicsnemo.sym.graph import Graph
+from physicsnemo.sym.eq.derivatives import MeshlessFiniteDerivative
 
 
 class Model(torch.nn.Module):
@@ -114,7 +113,7 @@ def test_graph_no_loss_node():
     model_node = Node(["x", "y", "z"], ["u", "v", "w", "p"], model, name="Model")
 
     loss = torch.jit.script(Loss()).to(device)
-    loss_node = Node(
+    Node(
         [diff("u", "x"), diff("v", "y"), diff("w", "z")],
         ["divergence_loss"],
         loss,

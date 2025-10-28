@@ -16,8 +16,7 @@
 
 import numpy as np
 import torch
-import os
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
 
 
 def test_advection_diffusion():

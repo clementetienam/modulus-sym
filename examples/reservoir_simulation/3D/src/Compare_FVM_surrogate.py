@@ -15,10 +15,10 @@
 # limitations under the License.
 
 import os
-from modulus.sym.hydra import to_absolute_path
-from modulus.sym.key import Key
+from physicsnemo.sym.hydra import to_absolute_path
+from physicsnemo.sym.key import Key
 from NVRS import *
-from modulus.sym.models.fno import *
+from physicsnemo.sym.models.fno import *
 import shutil
 import pandas as pd
 import scipy.io as sio
@@ -84,7 +84,7 @@ def process_chunk(chunk):
         Runs = len(chunks)
         processed_chunks.value += 1
         completion_percentage = (processed_chunks.value / len(chunks)) * 100
-        remaining_percentage = 100 - completion_percentage
+        100 - completion_percentage
         # print(f"Processed chunk {processed_chunks.value}. {completion_percentage:.2f}% completed. {remaining_percentage:.2f}% remaining.")
         progressBar = "\rPlotting Progress: " + ProgressBar(
             Runs, processed_chunks.value, Runs
@@ -101,7 +101,6 @@ def sort_key(s):
 
 
 def process_step(kk):
-
     f_3 = plt.figure(figsize=(20, 20), dpi=200)
     current_time = int((kk + 1) * dt * MAXZ)
 
@@ -113,15 +112,24 @@ def process_step(kk):
     lookf = lookf * pini_alt
     diff1 = abs(look - lookf)
     ax1 = f_3.add_subplot(331, projection="3d")
-    Plot_Modulus(
-        ax1, nx, ny, nz, look, N_injw, N_pr, "pressure Modulus", injectors, producers
+    Plot_PhysicsNeMo(
+        ax1,
+        nx,
+        ny,
+        nz,
+        look,
+        N_injw,
+        N_pr,
+        "pressure PhysicsNeMo",
+        injectors,
+        producers,
     )
     ax2 = f_3.add_subplot(332, projection="3d")
-    Plot_Modulus(
+    Plot_PhysicsNeMo(
         ax2, nx, ny, nz, lookf, N_injw, N_pr, "pressure Numerical", injectors, producers
     )
     ax3 = f_3.add_subplot(333, projection="3d")
-    Plot_Modulus(
+    Plot_PhysicsNeMo(
         ax3, nx, ny, nz, diff1, N_injw, N_pr, "pressure diff", injectors, producers
     )
     R2p, L2p = compute_metrics(look.ravel(), lookf.ravel())
@@ -130,15 +138,15 @@ def process_step(kk):
     lookf = Reinvent(cSat[0, kk, :, :, :])
     diff1 = abs(look - lookf)
     ax1 = f_3.add_subplot(334, projection="3d")
-    Plot_Modulus(
-        ax1, nx, ny, nz, look, N_injw, N_pr, "water Modulus", injectors, producers
+    Plot_PhysicsNeMo(
+        ax1, nx, ny, nz, look, N_injw, N_pr, "water PhysicsNeMo", injectors, producers
     )
     ax2 = f_3.add_subplot(335, projection="3d")
-    Plot_Modulus(
+    Plot_PhysicsNeMo(
         ax2, nx, ny, nz, lookf, N_injw, N_pr, "water Numerical", injectors, producers
     )
     ax3 = f_3.add_subplot(336, projection="3d")
-    Plot_Modulus(
+    Plot_PhysicsNeMo(
         ax3, nx, ny, nz, diff1, N_injw, N_pr, "water diff", injectors, producers
     )
     R2w, L2w = compute_metrics(look.ravel(), lookf.ravel())
@@ -147,15 +155,17 @@ def process_step(kk):
     lookf = 1 - (Reinvent(cSat[0, kk, :, :, :]))
     diff1 = abs(look - lookf)
     ax1 = f_3.add_subplot(337, projection="3d")
-    Plot_Modulus(
-        ax1, nx, ny, nz, look, N_injw, N_pr, "oil Modulus", injectors, producers
+    Plot_PhysicsNeMo(
+        ax1, nx, ny, nz, look, N_injw, N_pr, "oil PhysicsNeMo", injectors, producers
     )
     ax2 = f_3.add_subplot(338, projection="3d")
-    Plot_Modulus(
+    Plot_PhysicsNeMo(
         ax2, nx, ny, nz, lookf, N_injw, N_pr, "oil Numerical", injectors, producers
     )
     ax3 = f_3.add_subplot(339, projection="3d")
-    Plot_Modulus(ax3, nx, ny, nz, diff1, N_injw, N_pr, "oil diff", injectors, producers)
+    Plot_PhysicsNeMo(
+        ax3, nx, ny, nz, diff1, N_injw, N_pr, "oil diff", injectors, producers
+    )
     R2o, L2o = compute_metrics(look.ravel(), lookf.ravel())
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -186,7 +196,6 @@ while True:
         print("")
         print("please try again and select value between 1-2")
     else:
-
         break
 
 
@@ -311,7 +320,7 @@ wells = np.array(
 wells = np.reshape(wells, (-1, 3), "C")
 
 bb = os.path.isfile(to_absolute_path("../PACKETS/Test4.mat"))
-if bb == False:
+if not bb:
     print("....Downloading Please hold.........")
     download_file_from_google_drive(
         "1PX2XFG1-elzQItvkUERJqeOerTO2kevq", to_absolute_path("../PACKETS/Test4.mat")
@@ -468,7 +477,7 @@ if surrogate == 1:
     bb = os.path.isfile(
         "outputs/Forward_problem_FNO/ResSim/fno_forward_model_pressure.0.pth"
     )
-    if bb == False:
+    if not bb:
         print("....Downloading Please hold.........")
         download_file_from_google_drive(
             "11cr3-7zvAZA5zI1SpfevZOQhsYuzAJjy",
@@ -484,7 +493,6 @@ if surrogate == 1:
         modelP.eval()
         os.chdir(oldfolder)
     else:
-
         os.chdir("outputs/Forward_problem_FNO/ResSim")
         print(" Surrogate model learned with FNO")
         modelP.load_state_dict(torch.load("fno_forward_model_pressure.0.pth"))
@@ -495,7 +503,7 @@ if surrogate == 1:
     bba = os.path.isfile(
         "outputs/Forward_problem_FNO/ResSim/fno_forward_model_saturation.0.pth"
     )
-    if bba == False:
+    if not bba:
         print("....Downloading Please hold.........")
         download_file_from_google_drive(
             "1EnYGi6MiJum-i-QzbRrpmvsqdR0KSa9a",
@@ -525,7 +533,7 @@ else:
     bb = os.path.isfile(
         "outputs/Forward_problem_PINO/ResSim/pino_forward_model_pressure.0.pth"
     )
-    if bb == False:
+    if not bb:
         print("....Downloading Please hold.........")
         download_file_from_google_drive(
             "1unX_CW5_9aTV97LqkRWkYElwsjGkLYdl",
@@ -540,7 +548,6 @@ else:
         modelP.eval()
         os.chdir(oldfolder)
     else:
-
         os.chdir("outputs/Forward_problem_PINO/ResSim")
         print(" Surrogate model learned with PINO")
         modelP.load_state_dict(torch.load("pino_forward_model_pressure.0.pth"))
@@ -551,7 +558,7 @@ else:
     bba = os.path.isfile(
         "outputs/Forward_problem_PINO/ResSim/pino_forward_model_saturation.0.pth"
     )
-    if bba == False:
+    if not bba:
         print("....Downloading Please hold.........")
         download_file_from_google_drive(
             "1d9Vk9UiVU0sUV2KSh_H4gyH5OVUl2rqS",
@@ -646,7 +653,7 @@ font.set_weight("bold")
 fig4.text(
     0.5,
     0.98,
-    "R2(%) Accuracy - Modulus/Numerical(GPU)",
+    "R2(%) Accuracy - PhysicsNeMo/Numerical(GPU)",
     ha="center",
     va="center",
     fontproperties=font,
@@ -655,7 +662,7 @@ fig4.text(
 fig4.text(
     0.5,
     0.49,
-    "L2(%) Accuracy - Modulus/Numerical(GPU)",
+    "L2(%) Accuracy - PhysicsNeMo/Numerical(GPU)",
     ha="center",
     va="center",
     fontproperties=font,

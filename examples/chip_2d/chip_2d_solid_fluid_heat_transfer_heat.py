@@ -19,34 +19,32 @@ import warnings
 
 import torch
 import numpy as np
-from sympy import Symbol, Eq, tanh, Or, And
+from sympy import Symbol, Eq, Or, And
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
-from modulus.sym.utils.sympy.functions import parabola
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
-from modulus.sym.eq.pdes.navier_stokes import GradNormal
-from modulus.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, PhysicsNeMoConfig
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.eq.pdes.navier_stokes import GradNormal
+from physicsnemo.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
-    IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.utils.io.plotter import ValidatorPlotter, InferencerPlotter
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.models.fourier_net import FourierNetArch
-from modulus.sym.models.modified_fourier_net import ModifiedFourierNetArch
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.utils.io.plotter import ValidatorPlotter
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.node import Node
+from physicsnemo.sym.models.fourier_net import FourierNetArch
+from physicsnemo.sym.models.modified_fourier_net import ModifiedFourierNetArch
 
 
-@modulus.sym.main(config_path="conf_2d_solid_fluid", config_name="config_heat")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf_2d_solid_fluid", config_name="config_heat")
+def run(cfg: PhysicsNeMoConfig) -> None:
     #############
     # Real Params
     #############
@@ -76,17 +74,13 @@ def run(cfg: ModulusConfig) -> None:
     pressure_scale = mass_scale / (length_scale * time_scale**2)  # kg / (m s**2)
     density_scale = mass_scale / length_scale**3  # kg/m3
     watt_scale = (mass_scale * length_scale**2) / (time_scale**3)  # kg m**2 / s**3
-    joule_scale = (mass_scale * length_scale**2) / (
-        time_scale**2
-    )  # kg * m**2 / s**2
+    joule_scale = (mass_scale * length_scale**2) / (time_scale**2)  # kg * m**2 / s**2
 
     ##############################
     # Nondimensionalization Params
     ##############################
     # fluid params
-    nd_fluid_kinematic_viscosity = fluid_kinematic_viscosity / (
-        length_scale**2 / time_scale
-    )
+    fluid_kinematic_viscosity / (length_scale**2 / time_scale)
     nd_fluid_density = fluid_density / density_scale
     nd_fluid_specific_heat = fluid_specific_heat / (
         joule_scale / (mass_scale * temp_scale)
@@ -112,7 +106,7 @@ def run(cfg: ModulusConfig) -> None:
     print("nd_copper_diffusivity", nd_copper_diffusivity)
 
     # boundary params
-    nd_inlet_velocity = inlet_velocity / (length_scale / time_scale)
+    inlet_velocity / (length_scale / time_scale)
     nd_inlet_temp = inlet_temp / temp_scale
     nd_copper_source_grad = copper_heat_flux * length_scale / temp_scale
 
@@ -176,7 +170,6 @@ def run(cfg: ModulusConfig) -> None:
     chip_width = 1.0
     source_origin = (-0.7, -0.5)
     source_dim = (0.4, 0.0)
-    source_length = 0.4
 
     # define sympy variables to parametrize domain curves
     x, y = Symbol("x"), Symbol("y")
@@ -202,8 +195,8 @@ def run(cfg: ModulusConfig) -> None:
     chip2d = rec
     geo = channel - rec
     x_pos = Symbol("x_pos")
-    integral_line = Line((x_pos, channel_width[0]), (x_pos, channel_width[1]), 1)
-    x_pos_range = {
+    Line((x_pos, channel_width[0]), (x_pos, channel_width[1]), 1)
+    {
         x_pos: lambda batch_size: np.full(
             (batch_size, 1), np.random.uniform(channel_length[0], channel_length[1])
         )
@@ -373,7 +366,7 @@ def run(cfg: ModulusConfig) -> None:
         domain.add_validator(openfoam_validator)
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # add solid validation data
@@ -400,7 +393,7 @@ def run(cfg: ModulusConfig) -> None:
         domain.add_validator(openfoam_solid_validator)
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # make solver

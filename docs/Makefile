@@ -22,3 +22,13 @@ clean:
 
 %: Makefile
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+# package docs for CMS upload
+package_docs:
+	apt-get update && apt-get install -y zip unzip
+	rm -rf deeplearning/
+	mkdir deeplearning
+	mkdir deeplearning/physicsnemo
+	mkdir deeplearning/physicsnemo/physicsnemo-sym
+	cp -r _build/html/* deeplearning/physicsnemo/physicsnemo-sym/
+	zip -r deeplearning.zip deeplearning

@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
 import torch
 
-from modulus.sym.key import Key
-from modulus.sym.models.super_res_net import SRResNetArch
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.models.super_res_net import SRResNetArch
 
 
 def test_srresnet():

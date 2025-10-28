@@ -20,33 +20,24 @@ import warnings
 
 import torch
 import numpy as np
-from sympy import Symbol, Eq
+from sympy import Symbol
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_2d import Rectangle, Line, Channel2D
-from modulus.sym.utils.sympy.functions import parabola
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes, GradNormal
-from modulus.sym.eq.pdes.basic import NormalDotVec
-from modulus.sym.eq.pdes.turbulence_zero_eq import ZeroEquation
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
-from modulus.sym.domain.constraint import (
-    PointwiseBoundaryConstraint,
-    PointwiseInteriorConstraint,
-    IntegralBoundaryConstraint,
+import physicsnemo.sym
+from physicsnemo.sym.hydra import to_absolute_path, instantiate_arch, PhysicsNeMoConfig
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.eq.pdes.navier_stokes import NavierStokes
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.domain.constraint import (
     PointwiseConstraint,
 )
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.key import Key
-from modulus.sym.node import Node
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.key import Key
 
 
-@modulus.sym.main(config_path="conf_inverse", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf_inverse", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     nu, D = Symbol("nu"), Symbol("D")
 
     # make list of nodes to unroll graph on
@@ -106,7 +97,7 @@ def run(cfg: ModulusConfig) -> None:
     file_path = "openfoam/heat_sink_Pr5_clipped2.csv"
     if not os.path.exists(to_absolute_path(file_path)):
         warnings.warn(
-            f"Directory {file_path} does not exist. Cannot continue. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Cannot continue. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
         sys.exit()
 

@@ -20,35 +20,30 @@ import os
 import warnings
 
 import torch
-import modulus.sym
-from sympy import Symbol, Eq, Abs, tanh, And, Or
+import physicsnemo.sym
+from sympy import Symbol, Eq, tanh, And, Or
 import numpy as np
 import sys
 
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import Solver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.models.fourier_net import FourierNetArch
-from modulus.sym.domain.constraint import (
+from physicsnemo.sym.hydra import to_absolute_path, PhysicsNeMoConfig
+from physicsnemo.sym.utils.io import csv_to_dict
+from physicsnemo.sym.solver import Solver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.models.fourier_net import FourierNetArch
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
-    IntegralBoundaryConstraint,
 )
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.domain.validator import PointwiseValidator
-from modulus.sym.domain.inferencer import PointwiseInferencer
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.eq.pdes.navier_stokes import NavierStokes
-from modulus.sym.eq.pdes.basic import NormalDotVec, GradNormal
-from modulus.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.domain.validator import PointwiseValidator
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.basic import GradNormal
+from physicsnemo.sym.eq.pdes.diffusion import Diffusion, DiffusionInterface
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
 
 
-@modulus.sym.main(config_path="conf_heat", config_name="config")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf_heat", config_name="config")
+def run(cfg: PhysicsNeMoConfig) -> None:
     # params for simulation
     #############
     # Real Params
@@ -65,9 +60,8 @@ def run(cfg: ModulusConfig) -> None:
     # Nondimensionalization Params
     ##############################
     # fluid params
-    nu = fluid_viscosity / (fluid_density * inlet_velocity * length_scale)
+    fluid_viscosity / (fluid_density * inlet_velocity * length_scale)
     rho = 1
-    normalize_inlet_vel = 1.0
 
     # heat params
     k_fluid = 1.0
@@ -75,7 +69,7 @@ def run(cfg: ModulusConfig) -> None:
     D_solid = 0.10
     D_fluid = 0.02
     source_grad = 1.5
-    source_area = source_dim[0] * source_dim[2]
+    source_dim[0] * source_dim[2]
 
     # make list of nodes to unroll graph on
     ad = AdvectionDiffusion(T="theta_f", rho=rho, D=D_fluid, dim=3, time=False)
@@ -317,7 +311,7 @@ def run(cfg: ModulusConfig) -> None:
                 if key in ["x", "y", "z"]
             }
 
-        openfoam_flow_outvar_numpy = {
+        {
             key: value
             for key, value in openfoam_var.items()
             if key in ["u", "v", "w", "p"]
@@ -338,7 +332,7 @@ def run(cfg: ModulusConfig) -> None:
         )
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
 
     # solid data
@@ -391,7 +385,7 @@ def run(cfg: ModulusConfig) -> None:
         )
     else:
         warnings.warn(
-            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/resources/modulus_sym_examples_supplemental_materials"
+            f"Directory {file_path} does not exist. Will skip adding validators. Please download the additional files from NGC https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_sym_examples_supplemental_materials"
         )
     # add peak temperature monitor
     invar_heat_source = fpga.sample_boundary(

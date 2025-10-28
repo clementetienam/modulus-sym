@@ -17,8 +17,8 @@
 import torch
 from typing import Dict
 
-# Import from Modulus
-from modulus.loss.aggregator import Aggregator
+# Import from PhysicsNeMo
+from physicsnemo.loss.aggregator import Aggregator
 
 
 class CustomSum(Aggregator):
@@ -62,11 +62,11 @@ class CustomSum(Aggregator):
         # # Add losses
         for key in losses.keys():
             if "pressure" in key:
-                loss += lambda_pressure * (1 - decay_weight1) * ((losses[key]))
+                loss += lambda_pressure * (1 - decay_weight1) * (losses[key])
             if "water_sat" in key:
-                loss += lambda_saturation * (1 - decay_weight1) * ((losses[key]))
+                loss += lambda_saturation * (1 - decay_weight1) * (losses[key])
             if "pressured" in key:
-                loss += lambda_pressured * (1 - decay_weight1) * ((losses[key]))
+                loss += lambda_pressured * (1 - decay_weight1) * (losses[key])
             if "saturationd" in key:
-                loss += lambda_saturationd * (1 - decay_weight1) * ((losses[key]))
+                loss += lambda_saturationd * (1 - decay_weight1) * (losses[key])
         return loss

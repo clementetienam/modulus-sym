@@ -15,39 +15,32 @@
 # limitations under the License.
 
 import torch
-from torch.utils.data import DataLoader, Dataset
 from torch import Tensor
 import copy
 
 import numpy as np
 from sympy import Symbol, Eq, tanh, Or, And
-from omegaconf import DictConfig, OmegaConf
-import hydra
-from hydra.utils import to_absolute_path
 from typing import Dict
 
-import modulus.sym
-from modulus.sym.hydra import to_absolute_path, instantiate_arch, ModulusConfig
-from modulus.sym.utils.io import csv_to_dict
-from modulus.sym.solver import SequentialSolver
-from modulus.sym.domain import Domain
-from modulus.sym.geometry.primitives_3d import Box, Channel, Plane
-from modulus.sym.models.fourier_net import FourierNetArch
-from modulus.sym.models.arch import Arch
-from modulus.sym.domain.constraint import (
+import physicsnemo.sym
+from physicsnemo.sym.hydra import PhysicsNeMoConfig
+from physicsnemo.sym.solver import SequentialSolver
+from physicsnemo.sym.domain import Domain
+from physicsnemo.sym.models.fourier_net import FourierNetArch
+from physicsnemo.sym.models.arch import Arch
+from physicsnemo.sym.domain.constraint import (
     PointwiseBoundaryConstraint,
     PointwiseInteriorConstraint,
 )
-from modulus.sym.domain.monitor import PointwiseMonitor
-from modulus.sym.domain.inferencer import PointVTKInferencer
-from modulus.sym.utils.io import (
+from physicsnemo.sym.domain.monitor import PointwiseMonitor
+from physicsnemo.sym.domain.inferencer import PointVTKInferencer
+from physicsnemo.sym.utils.io import (
     VTKUniformGrid,
 )
-from modulus.sym.key import Key
-from modulus.sym.node import Node
-from modulus.sym.eq.pdes.basic import NormalDotVec, GradNormal
-from modulus.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
-from modulus.sym.distributed.manager import DistributedManager
+from physicsnemo.sym.key import Key
+from physicsnemo.sym.eq.pdes.basic import GradNormal
+from physicsnemo.sym.eq.pdes.advection_diffusion import AdvectionDiffusion
+from physicsnemo.sym.distributed.manager import DistributedManager
 
 from limerock_properties import *
 
@@ -97,8 +90,8 @@ class hFTBArch(Arch):
             param_prev_step.requires_grad = False
 
 
-@modulus.sym.main(config_path="conf", config_name="conf_thermal")
-def run(cfg: ModulusConfig) -> None:
+@physicsnemo.sym.main(config_path="conf", config_name="conf_thermal")
+def run(cfg: PhysicsNeMoConfig) -> None:
     if DistributedManager().distributed:
         print("Multi-GPU currently not supported for this example. Exiting.")
         return
@@ -174,7 +167,7 @@ def run(cfg: ModulusConfig) -> None:
     x, y, z = Symbol("x"), Symbol("y"), Symbol("z")
     import time as time
 
-    tic = time.time()
+    time.time()
 
     # inlet
     inlet = PointwiseBoundaryConstraint(
