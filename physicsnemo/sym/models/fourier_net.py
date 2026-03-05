@@ -19,7 +19,7 @@ from torch import Tensor
 from typing import Dict, List, Tuple
 
 import physicsnemo.sym.models.fully_connected as fully_connected
-from physicsnemo.models.layers import FourierLayer
+from physicsnemo.nn import FourierLayer
 from physicsnemo.sym.models.activation import Activation
 from physicsnemo.sym.models.arch import Arch
 from physicsnemo.sym.key import Key

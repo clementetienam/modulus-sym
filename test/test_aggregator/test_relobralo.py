@@ -69,6 +69,7 @@ def test_loss_aggregator():
 
     # Training loop
     for step in range(total_steps):
+        step = torch.tensor(step, dtype=torch.int64)
         optimizer.zero_grad()
         train_losses = loss_function(x_np)
         train_loss = aggregator(train_losses, step)

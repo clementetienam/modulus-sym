@@ -1456,8 +1456,8 @@ def run(cfg: PhysicsNeMoConfig) -> None:
     )
     nodes = (
         [darcyy]
-        + [afno_pressure.make_node("afnop_forward_model_pressure", jit=cfg.jit)]
-        + [afno_saturation.make_node("afnop_forward_model_saturation", jit=cfg.jit)]
+        + [afno_pressure.make_node("afnop_forward_model_pressure", jit=False)]
+        + [afno_saturation.make_node("afnop_forward_model_saturation", jit=False)]
     )
 
     # [constraint]

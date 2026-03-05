@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch import Tensor
 
 
-from physicsnemo.models.layers import FCLayer
+from physicsnemo.nn import FCLayer
 from physicsnemo.sym.models.arch import Arch
 from physicsnemo.sym.key import Key
 

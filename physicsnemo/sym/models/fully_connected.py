@@ -25,7 +25,7 @@ from physicsnemo.sym.amp import (
     amp_manager_scaler_enabled_and_disable_autocast_firstlayer,
 )
 
-from physicsnemo.models.layers import FCLayer, Conv1dFCLayer
+from physicsnemo.nn import FCLayer, Conv1dFCLayer
 from physicsnemo.sym.models.activation import Activation, get_activation_fn
 from physicsnemo.sym.models.arch import Arch
 

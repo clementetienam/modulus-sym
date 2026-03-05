@@ -6,11 +6,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.3.0a0] - 2025-XX-YY
+## [2.4.0a0] - 2026-XX-YY
 
 ### Added
-
-- Added Blackwell support
 
 ### Changed
 
@@ -20,10 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed HTTP Error 308 when running `examples/super_resolution.py`
+- Fixed deprecated documentation links to the Johns Hopkins Turbulence Database
+
 ### Security
 
 ### Dependencies
 
+- Updated package to use `physicsnemo` v2.0 APIs
+
+## [2.3.0] - 2025-11-17
+
+### Added
+
+- Added Blackwell support
 
 ## [2.2.0] - 2025-08-26
 

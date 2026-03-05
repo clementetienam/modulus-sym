@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 
 import physicsnemo.sym
-from physicsnemo.models.layers.spectral_layers import fourier_derivatives
+from physicsnemo.nn.module.spectral_layers import fourier_derivatives
 from physicsnemo.sym.hydra import instantiate_arch, PhysicsNeMoConfig
 from physicsnemo.sym.key import Key
 from physicsnemo.sym.node import Node

@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from physicsnemo.models.layers import FCLayer, FourierLayer
+from physicsnemo.nn import FCLayer, FourierLayer
 from physicsnemo.sym.models.activation import Activation, get_activation_fn
 from physicsnemo.sym.models.arch import Arch
 from physicsnemo.sym.key import Key

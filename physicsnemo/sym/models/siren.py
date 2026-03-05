@@ -19,7 +19,7 @@ from typing import List, Dict, Tuple, Optional
 import torch.nn as nn
 from torch import Tensor
 
-from physicsnemo.models.layers import SirenLayer, SirenLayerType
+from physicsnemo.nn import SirenLayer, SirenLayerType
 from physicsnemo.sym.models.arch import Arch
 from physicsnemo.sym.key import Key
 from physicsnemo.sym.constants import NO_OP_NORM

@@ -23,7 +23,7 @@ import itertools
 
 import physicsnemo.sym.models.fully_connected as fully_connected
 from physicsnemo.sym.models.activation import Activation
-from physicsnemo.models.layers.interpolation import (
+from physicsnemo.nn.module.interpolation import (
     _hyper_cube_weighting,
     smooth_step_2,
 )

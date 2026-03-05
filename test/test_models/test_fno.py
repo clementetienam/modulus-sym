@@ -39,8 +39,8 @@ def test_fno_1d():
         fno_modes=4,
         padding=0,
     )
-    # Testing JIT
-    model.make_node(name="FNO1d", jit=True)
+    # TorchScript (jit) disabled: upstream spectral layers use jaxtyping, which TorchScript does not support.
+    model.make_node(name="FNO1d", jit=False)
 
     bsize = 5
     invar = {
@@ -68,8 +68,8 @@ def test_fno_2d():
         fno_modes=16,
     )
 
-    # Testing JIT
-    model.make_node(name="FNO2d", jit=True)
+    # TorchScript (jit) disabled: upstream spectral layers use jaxtyping, which TorchScript does not support.
+    model.make_node(name="FNO2d", jit=False)
 
     bsize = 5
     invar = {
@@ -99,8 +99,8 @@ def test_fno_3d():
         fno_modes=16,
     )
 
-    # Testing JIT
-    model.make_node(name="FNO3d", jit=True)
+    # TorchScript (jit) disabled: upstream spectral layers use jaxtyping, which TorchScript does not support.
+    model.make_node(name="FNO3d", jit=False)
 
     bsize = 5
     invar = {

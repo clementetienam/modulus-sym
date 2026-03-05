@@ -59,7 +59,7 @@ class Loss(nn.Module):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         raise NotImplementedError("Subclass of Loss needs to implement this")
 
@@ -85,7 +85,7 @@ class PointwiseLossNorm(Loss):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
         ord: float,
     ) -> Dict[str, Tensor]:
         losses = {}
@@ -104,7 +104,7 @@ class PointwiseLossNorm(Loss):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         return PointwiseLossNorm._loss(
             invar, pred_outvar, true_outvar, lambda_weighting, step, self.ord
@@ -132,7 +132,7 @@ class IntegralLossNorm(Loss):
         list_pred_outvar: List[Dict[str, Tensor]],
         list_true_outvar: List[Dict[str, Tensor]],
         list_lambda_weighting: List[Dict[str, Tensor]],
-        step: int,
+        step: torch.Tensor,
         ord: float,
     ) -> Dict[str, Tensor]:
         # compute integral losses
@@ -165,7 +165,7 @@ class IntegralLossNorm(Loss):
         list_pred_outvar: List[Dict[str, Tensor]],
         list_true_outvar: List[Dict[str, Tensor]],
         list_lambda_weighting: List[Dict[str, Tensor]],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         return IntegralLossNorm._loss(
             list_invar,
@@ -225,7 +225,7 @@ class DecayedPointwiseLossNorm(DecayedLossNorm):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         return PointwiseLossNorm._loss(
             invar, pred_outvar, true_outvar, lambda_weighting, step, self.ord(step)
@@ -256,7 +256,7 @@ class DecayedIntegralLossNorm(DecayedLossNorm):
         list_pred_outvar: List[Dict[str, Tensor]],
         list_true_outvar: List[Dict[str, Tensor]],
         list_lambda_weighting: List[Dict[str, Tensor]],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         return IntegralLossNorm._loss(
             list_invar,
@@ -295,7 +295,7 @@ class CausalLossNorm(Loss):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
         ord: float,
         eps: float,
         n_chunks: int,
@@ -333,7 +333,7 @@ class CausalLossNorm(Loss):
         pred_outvar: Dict[str, Tensor],
         true_outvar: Dict[str, Tensor],
         lambda_weighting: Dict[str, Tensor],
-        step: int,
+        step: torch.Tensor,
     ) -> Dict[str, Tensor]:
         return CausalLossNorm._loss(
             invar,

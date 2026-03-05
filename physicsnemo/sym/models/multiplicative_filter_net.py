@@ -20,7 +20,7 @@ from typing import Optional, List, Dict, Tuple, Union
 import torch.nn as nn
 from torch import Tensor
 
-from physicsnemo.models.layers import FCLayer, FourierFilter, GaborFilter
+from physicsnemo.nn import FCLayer, FourierFilter, GaborFilter
 from physicsnemo.sym.models.activation import Activation, get_activation_fn
 from physicsnemo.sym.models.arch import Arch
 from physicsnemo.sym.key import Key

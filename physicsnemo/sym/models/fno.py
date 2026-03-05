@@ -22,7 +22,7 @@ from torch import Tensor
 import torch.nn.functional as F
 import logging
 
-from physicsnemo.models.layers import (
+from physicsnemo.nn import (
     Conv1dFCLayer,
     Conv2dFCLayer,
     Conv3dFCLayer,
@@ -30,7 +30,7 @@ from physicsnemo.models.layers import (
     SpectralConv2d,
     SpectralConv3d,
 )
-from physicsnemo.models.layers.spectral_layers import (
+from physicsnemo.nn.module.spectral_layers import (
     calc_latent_derivatives,
     first_order_pino_grads,
     second_order_pino_grads,

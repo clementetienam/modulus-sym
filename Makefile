@@ -1,6 +1,6 @@
 install:
 	pip install --upgrade pip && \
-		pip install -e . --no-build-isolation
+		pip install -e . --no-build-isolation --no-deps
 
 setup-ci:
 	pip install pre-commit && \

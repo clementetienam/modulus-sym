@@ -1635,8 +1635,8 @@ def run(cfg: PhysicsNeMoConfig) -> None:
     )
     nodes = (
         [darcyy]
-        + [fno_pressure.make_node("pino_forward_model_pressure", jit=cfg.jit)]
-        + [fno_saturation.make_node("pino_forward_model_saturation", jit=cfg.jit)]
+        + [fno_pressure.make_node("pino_forward_model_pressure", jit=False)]
+        + [fno_saturation.make_node("pino_forward_model_saturation", jit=False)]
     )
 
     # [constraint]
