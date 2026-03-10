@@ -21,7 +21,49 @@ from __future__ import print_function
 
 print(__doc__)
 import os
-from NVR import *
+import sys
+import numpy as np
+import time
+from datetime import timedelta
+from datetime import datetime as _datetime
+
+from NVR import (
+    Reservoir_Simulator,
+    Reservoir_Simulator2,
+    read_yaml,
+    print_section_title,
+    Gassmann,
+    Equivalent_time,
+    rescale_linear,
+    rescale_linear_numpy_pytorch,
+    rescale_linear_pytorch_numpy,
+    Peaceman_well,
+    Peaceman_well2,
+    calc_mu_g,
+    calc_rs,
+    calc_bg
+    
+)
+
+from plotting import (
+    Plot_RSM_percentile2,
+    Add_marker,
+    Add_marker2,
+    Plot_RSM_percentile,
+    plot_properties,
+    Plot_performance,
+    Plot_impedance,
+    Plot_performance2,
+    ProgressBar,
+    ShowBar,
+    plot3d2static,
+    plot3d2,
+)
+
+from geostats import initial_ensemble_gaussian
+    
+import multiprocessing
+from sklearn.preprocessing import MinMaxScaler 
 import pandas as pd
 import scipy.io as sio
 import datetime
@@ -323,8 +365,9 @@ def inference_single2(
         quse1 = Ainj + Aprod
 
         quse = np.reshape(quse1, (-1, 1), "F")
-        quse_water = np.reshape(Ainj, (-1, 1), "F")
-        quse_oil = np.reshape(Aprod, (-1, 1), "F")
+        quse_water = np.reshape(Ainj,          (-1, 1), "F")   # water injection source (+)
+        quse_oil   = np.reshape(quse1,         (-1, 1), "F")   # total q = Ainj + Aprod (+ and -)        
+        
         # print(A)
         A_out = Reservoir_Simulator2(
             a,
@@ -392,7 +435,7 @@ class Simulator:
     def run(self):
         plan = self.plan
 
-        N_components = int(plan["N_components"])
+        N_components = int(plan["RUNSPEC"]["N_components"])
         nx = int(plan["DIMENS"]["nx"])
         ny = int(plan["DIMENS"]["ny"])
         nz = int(plan["DIMENS"]["nz"])
@@ -420,8 +463,8 @@ class Simulator:
         P1 = cp.float32(pini_alt)
         step2 = int(plan["NSTACK"]["n_substep"])
         PB = P1
-        mpor, hpor = float(plan["MPOR"]), float(plan["HPOR"])
-        aay, bby = float(plan["aay"]), float(plan["bby"])
+        mpor, hpor = float(plan["ROCK"]["MPOR"]), float(plan["ROCK"]["HPOR"])
+        aay, bby = float(plan["ROCK"]["aay"]), float(plan["ROCK"]["bby"])
         _Low_K, _High_K = aay, bby
         BW = cp.float32(BW)
         BO = cp.float32(BO)
@@ -432,13 +475,13 @@ class Simulator:
         make_csv = int(plan["SUMMARY"]["make_csv"])
         make_gassman = int(plan["SUMMARY"]["make_gassman"])
         path_trueK = plan["INCLUDE"]["path_trueK"]
-        path_out = plan["path_out"]
+        path_out = plan["INCLUDE"]["path_out"]
 
         if N_components == 3:
             cp.float32(0)  # Initial gas saturation
         if N_components == 3:
-            UG = cp.float32(calc_mu_g(P1))  # gas viscosity in cP
-            RS = cp.float32(calc_rs(PB, P1))  # Solution GOR
+            UG = calc_mu_g(P1)  # gas viscosity in cP
+            RS = calc_rs(PB, P1)  # Solution GOR
             BG = calc_bg(PB, PATM, P1)  # gas formation volume factor
 
         SWOW = np.array(np.vstack(plan["PROPS"]["SWOW"]), dtype=float)
@@ -461,12 +504,24 @@ class Simulator:
         elif method == 2:
             mss1 = "spsolve"
         elif method == 3:
-            mss1 == "conjugate gradient"
+            mss1 = "conjugate gradient"
         elif method == 4:
             mss1 = "LSQR"
+        elif method == 5:
+            mss1 = "BICGSTAB"            
         else:
             mss1 = "CPR"
-        message1 = f"Number of components = {N_components}\nNx = {nx}\nNy = {ny}\nNz = {nz}\nLinear Solver = {mss1}"
+        #message1 = f"Number of components = {N_components}\nNx = {nx}\nNy = {ny}\nNz = {nz}\nLinear Solver = {mss1}"
+        message1 = (
+            f"Number of components = {N_components}\n"
+            f"Nx = {nx}\n"
+            f"Ny = {ny}\n"
+            f"Nz = {nz}\n"
+            f"Total grid blocks = {nx * ny * nz}\n"
+            f"Grid size = {nx}×{ny}×{nz} "
+            f"({nx * ny * nz:,} active cells)\n"
+            f"Linear Solver = {mss1}"
+        )
 
         # Print the message
         print(message1)
@@ -480,7 +535,7 @@ class Simulator:
         steppi = int(max_t / timmee)
 
         factorr = float(plan["MULTIPLY"]["z_factor"])
-        0.2 * DX
+        RE = 0.2 * DX
 
         rwell = 200  # well radius
         skin = 0  # well deformation
@@ -502,10 +557,10 @@ class Simulator:
             CFL = 2  # IMPLICT
             # step2 = int(input ('Enter the chop interval for time calculation (3-20): '))
             step2 = int(10)
-        if N_components == 3:
-            CFL = 1
-        if (nx * ny * nz) >= 10000:
-            CFL = 1
+        # if N_components == 3:
+            # CFL = 1
+        # if (nx * ny * nz) >= 10000:
+            # CFL = 1
         tc2 = Equivalent_time(timmee, MAXZ, timmee, max_t)
         dt = np.diff(tc2)[0]  # Time-step
 
@@ -528,12 +583,14 @@ class Simulator:
         NecessaryI = np.array(np.vstack(injectors)[:, 4:7], dtype=float)
         NecessaryP = np.array(np.vstack(producers)[:, 4:7], dtype=float)
 
-        MinMaxScaler(feature_range=(aay, bby))
+        scaler1a = MinMaxScaler(feature_range=(aay, bby))
         if CFL == 1:
             print_section_title("Begin IMPES simulation")
         if CFL == 2:
             print_section_title("Begin Fully Implicit simulation")
-        Truee = np.genfromtxt(path_trueK, dtype="float")
+        #Truee = np.genfromtxt(path_trueK, dtype="float")
+        
+        Truee = initial_ensemble_gaussian(nx, ny, nz, 1, aay, bby)        
 
         # Truee = np.reshape(Truee,(120,60,10))
 
@@ -1277,6 +1334,7 @@ class Simulator:
                     "Well rates and pressure computation took: %s secs (Wall clock time)"
                     % timedelta(seconds=round(elapsed_time_secs))
                 )
+                print(msg)
 
         else:  # 3phase flow
             if make_animation:
@@ -1813,13 +1871,135 @@ class Simulator:
         print("-------------------PROGRAM EXECUTED-----------------------------------")
 
 
+# if __name__ == "__main__":
+    # print(__doc__)
+
+    # if len(sys.argv) > 1:
+        # fname = sys.argv[1]
+    # else:
+        # sys.exit("Provide Yaml scenario! python NVRS/simulator.py Run.yaml")
+
+    # sim = Simulator(fname)
+    # sim.run()
+
+
+
+
+class Tee:
+    """
+    Duplicates writes to two streams simultaneously (e.g. stdout + log file).
+    Assign to sys.stdout / sys.stderr to tee all output transparently.
+
+    Usage
+    -----
+    log_fh     = open("run.log", "w", buffering=1)
+    sys.stdout = Tee(sys.stdout, log_fh)
+    sys.stderr = Tee(sys.stderr, log_fh)
+    """
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+    def fileno(self):
+        # Return the fileno of the first real stream so subprocess calls work
+        return self.streams[0].fileno()
 if __name__ == "__main__":
-    print(__doc__)
 
-    if len(sys.argv) > 1:
-        fname = sys.argv[1]
-    else:
-        sys.exit("Provide Yaml scenario! python NVRS/simulator.py Run.yaml")
+    # ── Banner ────────────────────────────────────────────────────────────────
+    banner = r"""
+#############################################################
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Author: Clement Etienam (cetienam@nvidia.com)
+#############################################################
 
-    sim = Simulator(fname)
-    sim.run()
+
+  NVIDIA GPU-Accelerated Black-Oil Reservoir Simulator
+#############################################################
+"""
+    print(banner)
+
+    # ── Argument parsing ──────────────────────────────────────────────────────
+    if len(sys.argv) < 2:
+        print("❌  No YAML deck provided.")
+        print("    Usage: python NVRS/simulator.py <deck.yaml>")
+        print("    Example: python NVRS/simulator.py Run.yaml")
+        sys.exit(1)
+
+    fname = sys.argv[1]
+
+    if not os.path.isfile(fname):
+        print(f"❌  YAML deck not found: {fname}")
+        sys.exit(1)
+
+    # ── Log file setup ────────────────────────────────────────────────────────
+    ts      = _datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = os.path.join(os.path.dirname(fname), "simulation_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"NVRS_run_{ts}.log")
+
+    # Tee stdout + stderr to log file
+    log_fh  = open(log_path, "w", buffering=1)
+    tee     = Tee(sys.stdout, log_fh)
+    sys.stdout = tee
+    sys.stderr = Tee(sys.stderr, log_fh)
+
+    # ── Config summary ────────────────────────────────────────────────────────
+    print(f"{'='*63}")
+    print(f"  📂  Deck          : {fname}")
+    print(f"  📋  Log file      : {log_path}")
+    print(f"  🕐  Start time    : {_datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+    print(f"{'='*63}\n")
+
+    # ── GPU detection ─────────────────────────────────────────────────────────
+    try:
+        import cupy as cp
+        n_gpu   = cp.cuda.runtime.getDeviceCount()
+        gpu_name = cp.cuda.runtime.getDeviceProperties(0)["name"].decode()
+        print(f"🖥️   Detected {n_gpu} GPU(s)  —  Primary: {gpu_name}")
+    except Exception:
+        print("⚠️   CuPy not available or no GPU detected — running on CPU")
+        n_gpu = 0
+
+    # ── Load & run ────────────────────────────────────────────────────────────
+    print(f"\n{'─'*63}")
+    print( "🚀  Initialising Simulator ...")
+    print(f"{'─'*63}")
+
+    try:
+        sim = Simulator(fname)
+
+        print(f"\n{'─'*63}")
+        print( "🚀  Running Simulation ...")
+        print(f"{'─'*63}\n")
+
+        sim.run()
+
+        print(f"\n{'='*63}")
+        print( "✅  Simulation completed successfully!")
+        print(f"    Log saved to       : {log_path}")
+        print(f"    End time           : {_datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+        print(f"{'='*63}")
+
+    except KeyboardInterrupt:
+        print("\n⚠️   Run interrupted by user (KeyboardInterrupt).")
+        sys.exit(130)
+
+    except Exception as e:
+        print(f"\n❌  Simulation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    finally:
+        log_fh.close()

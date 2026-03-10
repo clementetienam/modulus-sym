@@ -18,36 +18,75 @@
 """
 
 import os
+import os.path
 import sys
-import numpy as np
+import time
+import math
+import random
+import logging
+import warnings
+import multiprocessing
 
+import numpy as np
+import numpy.matlib
+import numpy.linalg
+import numpy.ma as ma
+from numpy import *
+from numpy.linalg import norm
+
+from scipy import interpolate, sparse
+from scipy.fftpack import dct
+from scipy.fftpack.realtransforms import idct
+import scipy.optimize.lbfgsb as lbfgsb
+
+import matplotlib.colors
+from matplotlib import cm
+from shutil import rmtree
+
+import yaml
+from pyDOE import lhs
+from cpuinfo import get_cpu_info
+from FyeldGenerator import generate_field
+from imresize import *
+from Style_interp import *
+
+import mpslib as mps
+
+warnings.filterwarnings("ignore")
+logger = logging.getLogger(__name__)
+
+
+# ── GPU / CPU backend selection ───────────────────────────────────────────────
 
 def is_available():
     """
-    Check NVIDIA with nvidia-smi command
-    Returning code 0 if no error, it means NVIDIA is installed
-    Other codes mean not installed
+    Check if a CUDA-capable GPU is available.
+    Prefers a direct CuPy / CUDA-runtime check; falls back to nvidia-smi.
+
+    Returns
+    -------
+    int
+        0 if a CUDA GPU is available, non-zero otherwise.
     """
-    code = os.system("nvidia-smi")
-    return code
+    try:
+        import cupy
+        if cupy.cuda.runtime.getDeviceCount() > 0:
+            return 0
+    except Exception:
+        pass
+
+    # Fallback: nvidia-smi shell check
+    cmd  = "nvidia-smi > nul 2>&1" if os.name == "nt" else "nvidia-smi > /dev/null 2>&1"
+    code = os.system(cmd)
+    return 0 if code == 0 else 1
 
 
 Yet = is_available()
+
 if Yet == 0:
-    # print('GPU Available with CUDA')
-
     import cupy as cp
-    from cupyx.scipy.sparse import spdiags
-    from numba import cuda
-
-    # print(cuda.detect())#Print the GPU information
-    import tensorflow as tf
-
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    config = tf.compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    sess = tf.compat.v1.InteractiveSession(config=config)
-    # import pyamgx
+    import cupyx.scipy.sparse as sparse
+    from cupyx.scipy.sparse import csr_matrix, spmatrix, spdiags, issparse
     from cupyx.scipy.sparse.linalg import (
         gmres,
         cg,
@@ -56,76 +95,30 @@ if Yet == 0:
         LinearOperator,
         spilu,
     )
-    from cupyx.scipy.sparse import csr_matrix, spmatrix
-    from cupy import sparse
-
+    from numba import cuda
     clementtt = 0
 else:
-    # print('No GPU Available')
     import numpy as cp
-    from scipy.sparse import csr_matrix
-    from scipy.sparse import spdiags
-    from scipy.sparse.linalg import gmres, spsolve, cg
-    from scipy import sparse
-
+    import scipy.sparse as sparse
+    from scipy.sparse import csr_matrix, spdiags
+    from scipy.sparse.linalg import gmres, cg, spsolve
     clementtt = 1
 
 
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-import os.path
+# ── Local solver imports ──────────────────────────────────────────────────────
 
-# import torch
-from scipy import interpolate
-import multiprocessing
-import mpslib as mps
-import numpy.matlib
-from pyDOE import lhs
-import matplotlib.colors
-from matplotlib import cm
-from shutil import rmtree
-import numpy
-
-# from PIL import Image
-from scipy.fftpack import dct
-import numpy.matlib
+from multigrid_solver import (
+    _to_csr,
+    residual,
+    amg_solve,
+)
+from Bicgstab import bicgstab_ilu
 
 
-# os.environ['KERAS_BACKEND'] = 'tensorflow'
-import os.path
-import time
-import random
+# ── CPU info ──────────────────────────────────────────────────────────────────
 
-# import dolfin as df
-from numpy import *
-from Style_interp import *
-import scipy.optimize.lbfgsb as lbfgsb
-import numpy.linalg
-from numpy.linalg import norm
-from scipy.fftpack.realtransforms import idct
-import numpy.ma as ma
-import logging
-import os
-from FyeldGenerator import generate_field
-from imresize import *
-import warnings
-import yaml
-
-warnings.filterwarnings("ignore")
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # I have just 1 GPU
-from cpuinfo import get_cpu_info
-
-# Prints a json string describing the cpu
-s = get_cpu_info()
-# print("Cpu info")
-# for k,v in s.items():
-# print(f"\t{k}: {v}")
 cores = multiprocessing.cpu_count()
-import math
-
-logger = logging.getLogger(__name__)
-# numpy.random.seed(99)
+s     = get_cpu_info()
 
 
 def read_yaml(fname):
@@ -140,189 +133,167 @@ def read_yaml(fname):
         return data
 
 
-def field2Metric(input, key):
+
+# ---------------------------------------------------------------------------
+# Unit conversion helper  (replaces field2Metric)
+# ---------------------------------------------------------------------------
+
+_CONVERSIONS = {
+    "psi":   6894.757,
+    "lbft3": 16.01846,
+    "ms":    3.28084,
+    "ft":    1.0 / 3.28084,     # ft/s → m/s
+}
+
+
+def field2Metric(value, unit: str):
+    """Multiply *value* by the appropriate SI conversion factor."""
+    factor = _CONVERSIONS[unit]
+    return value * factor
+
+
+# ---------------------------------------------------------------------------
+# Gassmann  (fully vectorised, GPU only)
+# ---------------------------------------------------------------------------
+
+def _t(label, t0):
+    cp.cuda.Stream.null.synchronize()   # flush GPU before timing
+    print(f"  {label}: {time.perf_counter()-t0:.4f}s")
+    return time.perf_counter()
+    
+    
+def Gassmann(PORO, Pr, SO, nx: int, ny: int, nz: int):
     """
-    Converts field (imperial) units to metric units
-    """
-    switcher = {
-        "psi": input * 6894.757293168,  # psi to Pa
-        "lbft3": input * 16.0184634,  # lb/ft3 to kg/m3
-        "ms": input * 3.2808399,  # m/s to ft/s
-        "ft": input / 3.2808399,  # ft/s to m/s
-    }
-    return switcher.get(key, "Please choose a correct unit!")
+    Compute P- and S-wave velocities and acoustic impedances via Gassmann's
+    equations, using a Backus-average over nz layers.
 
+    All heavy computation is batched over the full (nx, ny, nz) volume in
+    a handful of CuPy kernel launches — no Python loops over grid indices.
 
-def Gassmann(PORO, Pr, SO, nx, ny, nz):
-    """
-    Calculates the P- and S-wave velocities, and their corresponding acoustic impedances, using Gassmann's equations.
+    Parameters
+    ----------
+    PORO : cupy.ndarray, shape (nx, ny, nz)  — porosity (fraction)
+    Pr   : cupy.ndarray, shape (nx, ny, nz)  — pressure (psi)
+    SO   : cupy.ndarray, shape (nx, ny, nz)  — oil saturation (Eclipse format)
+    nx, ny, nz : grid dimensions
 
-    Args:
-    - PORO (numpy array): array of shape (nx, ny, nz) containing the porosity values of the rock.
-    - Pr (numpy array): array of shape (nx, ny, nz) containing the pressure values in psi.
-    - SO (numpy array): array of shape (nx, ny, nz) containing the oil saturation values in eclipse format.
-    - nx (int): number of grid blocks in the x-direction.
-    - ny (int): number of grid blocks in the y-direction.
-    - nz (int): number of grid blocks in the z-direction.
-
-    Returns:
-    - ImpP (numpy array): array of shape (nx, ny, nz) containing the P-wave acoustic impedance values in g/cm^2/s.
-    - ImpS (numpy array): array of shape (nx, ny, nz) containing the S-wave acoustic impedance values in g/cm^2/s.
-    - VP (numpy array): array of shape (nx, ny, nz) containing the P-wave velocity values in ft/s.
-    - VS (numpy array): array of shape (nx, ny, nz) containing the S-wave velocity values in ft/s.
+    Returns
+    -------
+    ImpP : cupy.ndarray (nx, ny)  — P-wave impedance  [g/cm²/s]
+    ImpS : cupy.ndarray (nx, ny)  — S-wave impedance  [g/cm²/s]
+    VP   : cupy.ndarray (nx, ny)  — P-wave velocity   [ft/s]
+    VS   : cupy.ndarray (nx, ny)  — S-wave velocity   [ft/s]
     """
 
-    # Poro - porosity (array shape)
-    # P - pressure (psi, eclipse formatted)
-    # SO - oil saturation (eclispe formatted)
+    # ------------------------------------------------------------------
+    # 0.  Ensure inputs are on GPU and cast to float64
+    # ------------------------------------------------------------------
+    PORO = cp.asarray(PORO, dtype=cp.float64)   # (nx, ny, nz)
+    Pr   = cp.asarray(Pr,   dtype=cp.float64)
+    SO   = cp.asarray(SO,   dtype=cp.float64)
 
-    T = 103  # C
-    POROVANCOUVER = PORO
+    # ------------------------------------------------------------------
+    # 1.  Convert inputs  (vectorised over full volume)
+    # ------------------------------------------------------------------
+    T   = 103.0                                  # °C  (scalar)
+    phi = PORO                                   # (nx, ny, nz)
+    P   = field2Metric(Pr, "psi") * 1e-6         # psi → MPa, shape (nx,ny,nz)
+    SOil = SO                                    # oil saturation (nx, ny, nz)
 
-    # sorting out indices
-    porosity = [cp.empty((nx, ny), dtype=cp.float64) for _ in range(nz)]
+    # ------------------------------------------------------------------
+    # 2.  Fluid properties  (Batzle & Wang — vectorised over all voxels)
+    # ------------------------------------------------------------------
+    # --- Water ---
+    CWater   = 3.13e-6                           # 1/psi
+    rhoWater = field2Metric(64.00, "lbft3")      # kg/m³  (scalar)
+    KWater   = field2Metric(1.0 / CWater, "psi") # Pa     (scalar)
 
-    for i in range(nz):
-        porosity[i] = POROVANCOUVER[:, :, i]
+    # --- Oil ---
+    G   = 0.8515                                 # gas specific gravity
+    RG  = 0.0                                    # GOR (m³/m³)
+    API = 141.5 / G - 131.5
 
-    # Read in pressure and oil saturation files
+    rho0      = 141.5 / (API + 131.5)           # g/cm³  (scalar)
+    B0        = 0.972 + 0.00038 * (2.4 * RG * cp.sqrt(G / rho0) + T + 17.8) ** 1.175
+    rhopseudo = rho0 / B0 * (1.0 + 0.001 * RG) ** -1   # g/cm³
+    rhoG      = (rho0 + 0.0012 * G * RG) / B0           # g/cm³
 
-    PressureAfter1Year = Pr
-    OilSatAfter1Year = SO
-
-    # labeling the imported data
-    pressure = [cp.empty((nx, ny), dtype=cp.float64) for _ in range(nz)]
-    saturation = [cp.empty((nx, ny), dtype=cp.float64) for _ in range(nz)]
-
-    for i in range(nz):
-        # psia to MPa
-        pressure[i] = field2Metric(PressureAfter1Year[:, :, i], "psi") * 1e-6
-
-        saturation[i] = OilSatAfter1Year[:, :, i]
-
-    # Water data
-
-    # Compressibility
-    CWater = 3.13e-6  # 1/psi
-
-    # Density
-    rhoWater = field2Metric(64.00, "lbft3")  # kg/m3
-
-    # Oil data
-    # Gas Specific gravity
-    G = 0.8515
-
-    # 600 SCF/BBL ->  m3/m3
-    RG = 0  # 600*0.0283168466/0.158987295;
-
-    # Oil API
-    API = 141.5 / G - 131.5  # need rhoOil in g/cm^3
-
-    # Matrix data
-    # From permeability - porosity graphs, assumed made of quartz and feldspar
-    # quartz dominant
-
-    # Density
-    # From Carmichael (1986)
-    # Try different percentage of quartz
-    SQuartz = 0.6
-    SFeldspar = 1 - SQuartz
-    KQuartz = 37e9  # Pa
-    KFeldspar = 37.5e9  # Pa
-    KMatrix = (
-        cp.ones((nx, ny)) * (SQuartz * KQuartz + SFeldspar * KFeldspar) / 2
-        + (SQuartz / KQuartz + SFeldspar / KFeldspar) ** (-1) / 2
+    # Pressure-/temperature-corrected oil density  [kg/m³]  — shape (nx,ny,nz)
+    rhoOil = (
+        1000.0
+        * (rho0 + (0.00277 * P - 1.71e-7 * P**3) * (rhoG - 1.15)**2 + P * 3.49e-4)
+        / (0.972 + 3.81e-4 * (T + 17.78)**1.175)
     )
 
-    # Frame data
-    # Lab data
-    rhoDry = cp.ones((nx, ny)) * 2169
-    KDry = cp.ones((nx, ny)) * field2Metric(2e6, "psi")
-    GDry = cp.ones((nx, ny)) * field2Metric(1.368e6, "psi")
+    # Oil P-wave velocity  [m/s]  — shape (nx, ny, nz)
+    VOil = (
+        2096.0 * cp.sqrt(rhopseudo / (2.6 - rhopseudo))
+        - 3.7  * T
+        + 4.64 * P
+        + 0.0115 * T * P * (4.12 * cp.sqrt(1.08 / rhopseudo - 1.0) - 1.0)
+    )
 
-    # Calculate parameters from input data for each z value
-    KSat = [cp.empty((nx, ny), dtype=cp.float64) for _ in range(nz)]
-    rhoSat = [cp.empty((nx, ny), dtype=cp.float64) for _ in range(nz)]
+    KOil = rhoOil * VOil**2                      # bulk modulus of oil [Pa]
 
-    for i in range(nz):
-        P = pressure[i]
-        SOil = saturation[i]
-        phi = porosity[i]
+    # ------------------------------------------------------------------
+    # 3.  Fluid mixing  (Wood's equation — fully vectorised)
+    # ------------------------------------------------------------------
+    # KFluid = ( (1-S)/Kw + S/Ko )^{-1}
+    KFluid  = 1.0 / ((1.0 - SOil) / KWater + SOil / KOil)  # (nx, ny, nz)
+    rhoFluid = (1.0 - SOil) * rhoWater + SOil * rhoOil       # (nx, ny, nz)
 
-        # Oil data (Batzle and Wang)
-        rho0 = 141.5 / (API + 131.5)  # g/cm3
+    # ------------------------------------------------------------------
+    # 4.  Matrix & frame constants  (broadcast over z automatically)
+    # ------------------------------------------------------------------
+    SQuartz   = 0.6
+    SFeldspar = 1.0 - SQuartz
+    KQuartz   = 37e9
+    KFeldspar = 37.5e9
 
-        # volume formation factor
-        B0 = 0.972 + 0.00038 * (2.4 * RG * cp.sqrt(G / rho0) + T + 17.8) ** (1.175)
-        # pseudo density
-        rhopseudo = rho0 / B0 * (1 + 0.001 * RG) ** -1  # g/cm3
+    KMatrix = (
+        (SQuartz * KQuartz + SFeldspar * KFeldspar) / 2.0
+        + 0.5 / (SQuartz / KQuartz + SFeldspar / KFeldspar)
+    )                                            # scalar (uniform matrix)
 
-        # density of oil with gas
-        rhoG = (rho0 + 0.0012 * G * RG) / B0  # g/cm3
+    rhoDry = 2169.0                              # kg/m³ (scalar)
+    KDry   = field2Metric(2.0e6,   "psi")       # Pa
+    GDry   = field2Metric(1.368e6, "psi")       # Pa
 
-        # density corrected for pressure and temperature
-        rhoOil = (
-            1000
-            * (rho0 + (0.00277 * P - 1.71e-7 * P**3) * (rhoG - 1.15) ** 2 + P * 3.49e-4)
-            / (0.972 + 3.81e-4 * (T + 17.78) ** 1.175)
-        )  # kg/m3
+    # ------------------------------------------------------------------
+    # 5.  Gassmann equations  — shape (nx, ny, nz)
+    # ------------------------------------------------------------------
+    KSat = KDry + (1.0 - KDry / KMatrix)**2 / (
+        phi / KFluid + (1.0 - phi) / KMatrix - KDry / KMatrix**2
+    )
+    GSat   = GDry                                # shear modulus unchanged
+    rhoSat = rhoDry + phi * rhoFluid             # (nx, ny, nz)
 
-        # Oil velocity from API (Batzle and Wang)
-        # Simplified version of the equation in the report
-        VOil = (
-            2096 * (rhopseudo / (2.6 - rhopseudo)) ** 0.5
-            - 3.7 * T
-            + 4.64 * P
-            + 0.0115 * T * P * (4.12 * (1.08 / rhopseudo - 1) ** 0.5 - 1)
-        )  # m/s
+    # ------------------------------------------------------------------
+    # 6.  Backus average over z  — single GPU reduction per (i,j) column
+    # ------------------------------------------------------------------
+    # C = < 1/(K + 4G/3) >_z^{-1}    (harmonic mean of M-modulus)
+    # D = G_Sat                        (isotropic shear — constant here)
+    # rho = < rho_Sat >_z              (arithmetic mean density)
+    M = KSat + (4.0 / 3.0) * GSat               # P-wave modulus (nx, ny, nz)
 
-        # Bulk physicsnemo of oil
-        KOil = rhoOil * VOil**2  # Pa
+    C   = 1.0 / cp.mean(1.0 / M,   axis=2)      # (nx, ny)  — harmonic mean
+    D   = cp.full((nx, ny), GSat, dtype=cp.float64)
+    rho = cp.mean(rhoSat, axis=2)               # (nx, ny)  — arithmetic mean
 
-        # Bulk physicsnemo of water
-        KWater = field2Metric(1.0 / CWater, "psi")  # Pa
+    # ------------------------------------------------------------------
+    # 7.  Velocities & impedances
+    # ------------------------------------------------------------------
+    VP = cp.sqrt(C / rho)                        # m/s  (nx, ny)
+    VS = cp.sqrt(D / rho)                        # m/s  (nx, ny)
 
-        # Woodcock's equation
-        KFluid = ((1 - SOil) / KWater + SOil / KOil) ** (-1)  # Pa
-        rhoFluid = (1 - SOil) * rhoWater + SOil * rhoOil  # kg/m3
-
-        # Gassmann equations (in SI units)Dry,shape
-        KSat[i] = KDry + (1 - KDry / KMatrix) ** 2 / (
-            phi / KFluid + (1 - phi) / KMatrix - KDry / KMatrix**2
-        )
-        GSat = GDry
-
-        # Density equation
-        rhoSat[i] = rhoDry + phi * rhoFluid
-
-    # Backus Average
-    D = cp.empty((nx, ny), dtype=cp.float64)
-    C = cp.empty((nx, ny), dtype=cp.float64)
-    rho = cp.empty((nx, ny), dtype=cp.float64)
-    for i in range(nx):
-        for j in range(ny):
-            element = []
-            density = []
-            for k in range(nz):
-                element.append(1 / (KSat[k][i, j] + 4 / 3 * GSat[i, j]))
-                density.append(rhoSat[k][i, j])
-            D[i, j] = GSat[i, j]
-            C[i, j] = cp.mean(cp.asarray(element)) ** (-1)
-            rho[i, j] = cp.mean(cp.asarray(density))
-
-    # P and S wave velocities
-    VP = (C / rho) ** 0.5  # m/s
-    VS = (D / rho) ** 0.5
-
-    # Seismic data (output)
-    VP = field2Metric(VP, "ms")  # ft/s
+    VP = field2Metric(VP, "ms")                  # → ft/s
     VS = field2Metric(VS, "ms")
 
-    rho = rho / 1000  # g/cm3
+    rho_gcc = rho / 1000.0                       # kg/m³ → g/cm³
 
-    # Impedance
-    ImpP = rho * VP
-    rho * VS
+    ImpP = rho_gcc * VP                          # g/cm²/s
+    ImpS = rho_gcc * VS
+
     return ImpP
 
 
@@ -348,1168 +319,17 @@ def python_to_simulator(a, ny, nx, nz):
     return cp.vstack(anew)
 
 
-def Add_marker(plt, XX, YY, locc):
-    """
-    Function to add marker to given coordinates on a matplotlib plot
-
-    less
-    Copy code
-    Parameters:
-        plt: a matplotlib.pyplot object to add the markers to
-        XX: a numpy array of X coordinates
-        YY: a numpy array of Y coordinates
-        locc: a numpy array of locations where markers need to be added
-
-    Return:
-        None
-    """
-    # iterate through each location
-    for i in range(locc.shape[0]):
-        a = locc[i, :]
-        xloc = int(a[0])
-        yloc = int(a[1])
-
-        # if the location type is 2, add an upward pointing marker
-        if a[2] == 2:
-            plt.scatter(
-                XX.T[xloc - 1, yloc - 1] + 0.5,
-                YY.T[xloc - 1, yloc - 1] + 0.5,
-                s=100,
-                marker="^",
-                color="white",
-            )
-        # otherwise, add a downward pointing marker
-        else:
-            plt.scatter(
-                XX.T[xloc - 1, yloc - 1] + 0.5,
-                YY.T[xloc - 1, yloc - 1] + 0.5,
-                s=100,
-                marker="v",
-                color="white",
-            )
-
-
-def Add_marker2(plt, XX, YY, injectors, producers):
-    """
-    Function to add marker to given coordinates on a matplotlib plot
-
-    less
-    Copy code
-    Parameters:
-        plt: a matplotlib.pyplot object to add the markers to
-        XX: a numpy array of X coordinates
-        YY: a numpy array of Y coordinates
-        locc: a numpy array of locations where markers need to be added
-
-    Return:
-        None
-    """
-
-    n_inj = len(injectors)  # Number of injectors
-    n_prod = len(producers)  # Number of producers
-
-    for mm in range(n_inj):
-        usethis = injectors[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-
-        plt.scatter(
-            XX.T[xloc - 1, yloc - 1] + 0.5,
-            YY.T[xloc - 1, yloc - 1] + 0.5,
-            s=200,
-            marker="v",
-            color="white",
-        )
-        plt.text(
-            XX.T[xloc - 1, yloc - 1] + 0.5,
-            YY.T[xloc - 1, yloc - 1] + 0.5,
-            discrip,
-            color="black",
-            weight="bold",
-            horizontalalignment="center",
-            verticalalignment="center",
-            fontsize=12,
-        )
-
-    for mm in range(n_prod):
-        usethis = producers[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-        plt.scatter(
-            XX.T[xloc - 1, yloc - 1] + 0.5,
-            YY.T[xloc - 1, yloc - 1] + 0.5,
-            s=200,
-            marker="^",
-            color="white",
-        )
-        plt.text(
-            XX.T[xloc - 1, yloc - 1] + 0.5,
-            YY.T[xloc - 1, yloc - 1] + 0.5,
-            discrip,
-            color="black",
-            weight="bold",
-            horizontalalignment="center",
-            verticalalignment="center",
-            fontsize=12,
-        )
-
 
 def residual(A, b, x):
     return b - A @ x
 
 
-@cuda.jit
-def prolongation_kernel(x, fine_x, fine_grid_size):
-    i = cuda.grid(1)
-    if i < fine_grid_size:
-        fine_x[i] = x[i // 2]
-
-
-def prolongation(x, fine_grid_size):
-    fine_x = cp.zeros((fine_grid_size,), dtype=x.dtype)
-    blocks = (
-        fine_grid_size + cuda.get_current_device().WARP_SIZE - 1
-    ) // cuda.get_current_device().WARP_SIZE
-    threads = cuda.get_current_device().WARP_SIZE
-    prolongation_kernel[blocks, threads](x, fine_x, fine_grid_size)
-    return fine_x
-
-
-def v_cycle(A, b, x, smoother, levels, tol, smoothing_steps):
-    """
-    Function to perform V-cycle multigrid method for solving a linear system of equations Ax=b
-    Parameters:
-        A: a cupyx.scipy.sparse CSR matrix representing the system matrix A
-        b: a cupy ndarray representing the right-hand side vector b
-        x: a cupy ndarray representing the initial guess for the solution vector x
-        smoother: a string representing the type of smoothing method to use
-                  (possible values: 'jacobi', 'gauss-seidel', 'SOR')
-        levels: an integer representing the number of levels in the multigrid method
-        tol: a float representing the tolerance for the residual norm
-        smoothing_steps: an integer representing the number of smoothing steps to perform at each level
-        color: a boolean representing whether to use coloring for Gauss-Seidel smoother
-
-    Return:
-        x: a cupy ndarray representing the solution vector x
-    """
-
-    # iterate through each level
-    for level in range(levels):
-        # if on finest level, solve exactly
-        if level == levels - 1:
-            # solve exactly on finest grid
-            A = check_cupy_sparse_matrix(A)
-            x = spsolve(A, b)
-
-            # check if tolerance is met
-            if ((cp.sum(b - A @ x)) / b.shape[0]) < tol:
-                break
-            return x
-        else:
-            # perform smoothing
-            for i in range(smoothing_steps):
-                if smoother == "jacobi":
-                    x, _ = jacobi(A, b, x, omega=1.0, tol=1e-6, max_iters=100)
-                    r = residual(A, b, x)
-                elif smoother == "gauss-seidel":
-                    x = gauss_seidel(A, b, x, omega=1.0, tol=1e-6, max_iters=100)
-                    r = residual(A, b, x)
-                elif smoother == "SOR":
-                    x = SOR(A, b, omega=1.5, tol=1e-6, max_iter=100)
-                    r = residual(A, b, x)
-                else:
-                    r = residual(A, b, x)
-                    x += spsolve(A, r)
-
-            # restrict residual to coarser grid
-            coarse_A, coarse_r = restriction(A, r)
-            coarse_A = check_cupy_sparse_matrix(coarse_A)
-
-            # solve exactly on coarser grid
-            coarse_x = v_cycle(
-                coarse_A,
-                coarse_r,
-                cp.zeros_like(coarse_r),
-                smoother,
-                levels - 1,
-                tol,
-                smoothing_steps,
-            )
-
-            # interpolate solution back to fine grid
-            x += prolongation(coarse_x, fine_grid_size=A.shape[0])
-
-    return x
-
-
-def gauss_seidel(A, b, x0, omega=1.0, tol=1e-6, max_iters=100):
-    """
-    Gauss-Seidel method with overrelaxation for solving linear system Ax=b.
-    Parameters:
-        A: a cupy.sparse matrix representing the system matrix A
-        b: a cupy.ndarray representing the right-hand side vector b
-        x0: a cupy.ndarray representing the initial guess for the solution vector x
-        omega: a float representing the relaxation factor (default=1.0)
-        tol: a float representing the tolerance for the residual norm (default=1e-8)
-        max_iters: an integer representing the maximum number of iterations (default=1000)
-    Returns:
-        x: a cupy.ndarray representing the solution vector x
-    """
-    x = cp.copy(x0)
-    residual_norm = tol + 1.0  # initialize with a value larger than the tolerance
-    iters = 0
-    while residual_norm > tol and iters < max_iters:
-        dot_products = A @ x
-        x_new = (1 - omega) * x + omega * (
-            b - dot_products + A.diagonal() * x
-        ) / A.diagonal()
-        residual_norm = cp.linalg.norm(A @ x_new - b)
-        x = x_new
-        iters += 1
-    return x
-
-
-def jacobi(A, b, x, omega=1.0, tol=1e-6, max_iters=100):
-    """
-    Jacobi iteration for solving linear systems.
-
-    Parameters
-    ----------
-    A : cupy.sparse.csr_matrix, shape (N, N)
-        The coefficient matrix.
-    b : cupy.ndarray, shape (N,)
-        The right-hand side vector.
-    x : cupy.ndarray, shape (N,)
-        The initial guess for the solution.
-    omega : float, optional
-        The relaxation parameter. Default is 1.0 (no relaxation).
-    tol : float, optional
-        The tolerance for convergence. Default is 1e-6.
-    max_iters : int, optional
-        The maximum number of iterations. Default is 1000.
-
-    Returns
-    -------
-    x : cupy.ndarray, shape (N,)
-        The solution.
-    iters : int
-        The number of iterations performed.
-    """
-    D = A.diagonal()
-    R = A - cp.diagflat(D)
-    iters = 0
-    res = 1.0
-    while res > tol and iters < max_iters:
-        x_new = (b - R @ x) / D
-        x = x + omega * (x_new - x)
-        res = cp.linalg.norm(b - A @ x)
-        iters += 1
-    return x, iters
-
-
-def SOR(A, b, omega=1.5, tol=1e-6, max_iter=100):
-    """
-    Use successive over-relaxation to solve Ax=b.
-
-    Parameters
-    ----------
-    A : cupy.sparse.csr_matrix, shape (N, N)
-        The coefficient matrix.
-    b : cupy.ndarray, shape (N,)
-        The right-hand side vector.
-    omega : float, optional
-        The relaxation parameter. Default is 1.5.
-    tol : float, optional
-        The convergence tolerance. Default is 1e-4.
-    max_iter : int, optional
-        The maximum number of iterations. Default is 1000.
-
-    Returns
-    -------
-    x : cupy.ndarray, shape (N,)
-        The solution vector.
-    """
-
-    N = A.shape[0]
-    x = cp.zeros(N, dtype=cp.float32)
-    omega_a = omega - 1
-
-    # Compute the inverse of the diagonal
-    D_inv = cp.reciprocal(A.diagonal())
-
-    for k in range(max_iter):
-        # Perform one SOR iteration
-        x_new = x + omega_a * x
-        x_new += omega * D_inv * (b - A @ x_new)
-
-        # Compute the residual
-        res = cp.linalg.norm(b - A @ x_new, ord=2)
-
-        # Check for convergence
-        if res < tol:
-            break
-
-        # Update x for the next iteration
-        x = x_new
-
-    return x_new
-
-
-def check_cupy_sparse_matrix(A):
-    """
-    Function to check if a matrix is a Cupy sparse matrix and convert it to a CSR matrix if necessary
-
-    Parameters:
-        A: a sparse matrix
-
-    Return:
-        A: a CSR matrix
-    """
-
-    if not isinstance(A, spmatrix):
-        # Convert the matrix to a csr matrix if it is not already a cupy sparse matrix
-        A = csr_matrix(A)
-    return A
-
-
-def restriction(A, f):
-    """
-    Coarsen the matrix A and vector f with aggregation.
-
-    Parameters
-    ----------
-    A : cupy.sparse.csr_matrix, shape (N, N)
-        The coefficient matrix.
-    f : cupy.ndarray, shape (N,)
-        The right-hand side vector.
-
-    Returns
-    -------
-    A_coarse : cupy.sparse.csr_matrix, shape (N_coarse, N_coarse)
-        The coarsened coefficient matrix.
-    f_coarse : cupy.ndarray, shape (N_coarse,)
-        The coarsened right-hand side vector.
-    """
-
-    N = A.shape[0]
-
-    # Divide the nodes into aggregates
-    aggregate_size = 2
-    num_aggregates = N // aggregate_size
-    aggregates = cp.arange(N) // aggregate_size
-
-    # Compute the indices of the first node in each aggregate
-    unique_aggregates, first_node_indices = cp.unique(aggregates, return_index=True)
-    reps = cp.zeros((num_aggregates,), dtype=cp.int32)
-    reps[unique_aggregates] = first_node_indices
-
-    # Create the aggregation matrix P
-    node_counts = cp.diff(A.indptr)  # get number of nonzero entries in each row
-    node_counts = cp.clip(node_counts, a_min=1, a_max=None)  # avoid divide-by-zero
-    P = cp.zeros((N, num_aggregates), dtype=cp.float32)
-    P[cp.arange(N), aggregates] = 1.0 / node_counts[cp.arange(N)]
-    P[reps, cp.arange(num_aggregates)] = 1.0
-
-    # Compute the level schedule
-    level_schedule = []
-    current_level = cp.where(node_counts == 1)[0]  # nodes with degree 1
-    while len(current_level) > 0:
-        level_schedule.append(current_level)
-        neighbors = cp.unique(A[current_level, :].indices)
-        next_level = cp.setdiff1d(neighbors, current_level)
-        current_level = next_level
-    level_schedule.append(cp.arange(N)[node_counts > 1])  # nodes with degree > 1
-
-    # Coarsen the matrix and vector
-    A_coarse = A
-    f_coarse = f
-    for level in level_schedule:
-        A_coarse = P[level, :].T @ A_coarse @ P[level, :]
-        f_coarse = P[level, :].T @ f_coarse
-
-    return A_coarse, f_coarse
-
-
-def Plot_RSM_percentile(True_mat, Namesz):
-    timezz = True_mat[:, 0].reshape(-1, 1)
-
-    plt.figure(figsize=(40, 40))
-
-    plt.subplot(4, 4, 1)
-    plt.plot(timezz, True_mat[:, 1], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 2)
-    plt.plot(timezz, True_mat[:, 2], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 3)
-    plt.plot(timezz, True_mat[:, 3], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 4)
-    plt.plot(timezz, True_mat[:, 4], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 5)
-    plt.plot(timezz, True_mat[:, 5], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 6)
-    plt.plot(timezz, True_mat[:, 6], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 7)
-    plt.plot(timezz, True_mat[:, 7], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 8)
-    plt.plot(timezz, True_mat[:, 8], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 9)
-    plt.plot(timezz, True_mat[:, 9], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 10)
-    plt.plot(timezz, True_mat[:, 10], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 11)
-    plt.plot(timezz, True_mat[:, 11], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 12)
-    plt.plot(timezz, True_mat[:, 12], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 13)
-    plt.plot(timezz, True_mat[:, 13], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 14)
-    plt.plot(timezz, True_mat[:, 14], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 15)
-    plt.plot(timezz, True_mat[:, 15], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(4, 4, 16)
-    plt.plot(timezz, True_mat[:, 16], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-    plt.suptitle("FIELD PRODUCTION PROFILE", fontsize=25)
-
-    # os.chdir('RESULTS')
-    plt.savefig(
-        Namesz
-    )  # save as png                                  # preventing the figures from showing
-    # os.chdir(oldfolder)
-    plt.clf()
-    plt.close()
-
-
-def Plot_RSM_percentile2(True_mat, Namesz):
-    timezz = True_mat[:, 0].reshape(-1, 1)
-
-    plt.figure(figsize=(40, 40))
-
-    plt.subplot(5, 4, 1)
-    plt.plot(timezz, True_mat[:, 1], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 2)
-    plt.plot(timezz, True_mat[:, 2], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 3)
-    plt.plot(timezz, True_mat[:, 3], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 4)
-    plt.plot(timezz, True_mat[:, 4], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("BHP(Psia)", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("I4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 5)
-    plt.plot(timezz, True_mat[:, 5], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 6)
-    plt.plot(timezz, True_mat[:, 6], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 7)
-    plt.plot(timezz, True_mat[:, 7], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 8)
-    plt.plot(timezz, True_mat[:, 8], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{oil}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 9)
-    plt.plot(timezz, True_mat[:, 9], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 10)
-    plt.plot(timezz, True_mat[:, 10], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 11)
-    plt.plot(timezz, True_mat[:, 11], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 12)
-    plt.plot(timezz, True_mat[:, 12], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{water}(bbl/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 13)
-    plt.plot(timezz, True_mat[:, 13], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{gas}(scf/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 14)
-    plt.plot(timezz, True_mat[:, 14], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{gas}(scf/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 15)
-    plt.plot(timezz, True_mat[:, 15], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{gas}(scf/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 16)
-    plt.plot(timezz, True_mat[:, 16], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$Q_{gas}(scf/day)$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 17)
-    plt.plot(timezz, True_mat[:, 17], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P1", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 18)
-    plt.plot(timezz, True_mat[:, 18], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P2", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 19)
-    plt.plot(timezz, True_mat[:, 19], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P3", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.subplot(5, 4, 20)
-    plt.plot(timezz, True_mat[:, 20], color="red", lw="2", label="model")
-    plt.xlabel("Time (days)", fontsize=13)
-    plt.ylabel("$WWCT{%}$", fontsize=13)
-    # plt.ylim((0,25000))
-    plt.title("P4", fontsize=13)
-    plt.ylim(ymin=0)
-    plt.xlim(xmin=0)
-    plt.legend()
-
-    plt.suptitle("FIELD PRODUCTION PROFILE", fontsize=25)
-    # os.chdir('RESULTS')
-    plt.savefig(
-        Namesz
-    )  # save as png                                  # preventing the figures from showing
-    # os.chdir(oldfolder)
-    plt.clf()
-    plt.close()
-
-
-def plot_properties(perm, poro, nx, ny, nz, wells):
-    if nz == 1:
-        permeability = np.reshape(perm, (nx, ny), "F")
-        porosity = np.reshape(poro, (nx, ny), "F")
-
-        permeability = cp.asnumpy(permeability)
-        porosity = cp.asnumpy(porosity)
-
-        XX, YY = np.meshgrid(np.arange(nx), np.arange(ny))
-
-        plt.figure(figsize=(12, 12))
-        plt.subplot(2, 2, 1)
-        plt.pcolormesh(XX.T, YY.T, permeability, cmap="jet")
-
-        plt.title("permeability ", fontsize=15)
-        plt.ylabel("Y", fontsize=13)
-        plt.xlabel("X", fontsize=13)
-        plt.axis([0, (nx - 1), 0, (ny - 1)])
-        plt.gca().set_xticks([])
-        plt.gca().set_yticks([])
-        cbar1 = plt.colorbar()
-        cbar1.ax.set_ylabel(" K (mD)", fontsize=13)
-        plt.clim(min(cp.ravel(permeability)), max(cp.ravel(permeability)))
-        Add_marker(plt, XX, YY, wells)
-
-        plt.subplot(2, 2, 2)
-        plt.pcolormesh(XX.T, YY.T, porosity, cmap="jet")
-        # Add_marker(plt,XX,YY,wells)
-        plt.title("porosity ", fontsize=15)
-        plt.ylabel("Y", fontsize=13)
-        plt.xlabel("X", fontsize=13)
-        plt.axis([0, (nx - 1), 0, (ny - 1)])
-        plt.gca().set_xticks([])
-        plt.gca().set_yticks([])
-        cbar1 = plt.colorbar()
-        cbar1.ax.set_ylabel(" K (mD)", fontsize=13)
-        plt.clim(min(cp.ravel(porosity)), max(cp.ravel(porosity)))
-        Add_marker(plt, XX, YY, wells)
-        plt.savefig(os.path.join(path_save, "properties.png"))
-        plt.clf()
-        plt.close()
-    else:
-        permeability = np.reshape(perm, (nx, ny, nz), "F")
-
-        porosity = np.reshape(poro, (nx, ny, nz), "F")
-
-        permeability = cp.asnumpy(permeability)
-        porosity = cp.asnumpy(porosity)
-
-        XX, YY = np.meshgrid(np.arange(nx), np.arange(ny))
-
-        plt.figure(figsize=(12, 12))
-
-        for i in range(nz):
-            plt.subplot(2, 3, i + 1)
-            plt.pcolormesh(XX.T, YY.T, permeability[:, :, i], cmap="jet")
-            title = "Perm_Layer_" + str(i + 1)
-            plt.title(title, fontsize=15)
-            plt.ylabel("Y", fontsize=13)
-            plt.xlabel("X", fontsize=13)
-            plt.axis([0, (nx - 1), 0, (ny - 1)])
-            plt.gca().set_xticks([])
-            plt.gca().set_yticks([])
-            cbar1 = plt.colorbar()
-            cbar1.ax.set_ylabel(" K (mD)", fontsize=13)
-            plt.clim(min(cp.ravel(permeability)), max(cp.ravel(permeability)))
-            Add_marker(plt, XX, YY, wells)
-        plt.savefig(os.path.join(path_save, "properties_perm.png"))
-        plt.clf()
-        plt.close()
-
-        plt.figure(figsize=(12, 12))
-        for i in range(nz):
-            plt.subplot(2, 3, i + 1)
-            plt.pcolormesh(XX.T, YY.T, porosity[:, :, i], cmap="jet")
-            title = "Perm_Layer_" + str(i + 1)
-            plt.title(title, fontsize=15)
-            plt.ylabel("Y", fontsize=13)
-            plt.xlabel("X", fontsize=13)
-            plt.axis([0, (nx - 1), 0, (ny - 1)])
-            plt.gca().set_xticks([])
-            plt.gca().set_yticks([])
-            cbar1 = plt.colorbar()
-            cbar1.ax.set_ylabel(" units", fontsize=13)
-            plt.clim(min(cp.ravel(porosity)), max(cp.ravel(porosity)))
-            Add_marker(plt, XX, YY, wells)
-        plt.savefig(os.path.join(path_save, "properties_porosity.png"))
-        plt.clf()
-        plt.close()
 
 
 def print_section_title(text: str) -> None:
     print("\n# ----------------------------------------")
     print(f"# {text.upper()}")
     print("# ----------------------------------------")
-
-
-def Plot_performance(trueF, nx, ny, namet, itt, dt, MAXZ, steppi, wells):
-    progressBar = "\rPlotting Progress: " + ProgressBar(steppi - 1, itt - 1, steppi - 1)
-    ShowBar(progressBar)
-    time.sleep(1)
-
-    lookf = trueF[itt, :, :]
-    lookf_sat = trueF[itt + steppi, :, :]
-    lookf_oil = 1 - lookf_sat
-
-    XX, YY = np.meshgrid(np.arange(nx), np.arange(ny))
-    plt.figure(figsize=(12, 12))
-
-    plt.subplot(2, 2, 1)
-    plt.pcolormesh(XX.T, YY.T, lookf, cmap="jet")
-    plt.title("Pressure CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" Pressure (psia)", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.subplot(2, 2, 2)
-    plt.pcolormesh(XX.T, YY.T, lookf_sat, cmap="jet")
-    plt.title("water_sat CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" water sat", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.subplot(2, 2, 3)
-    plt.pcolormesh(XX.T, YY.T, lookf_oil, cmap="jet")
-    plt.title("oil_sat CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" oil sat", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    tita = "Timestep --" + str(int((itt + 1) * dt * MAXZ)) + " days"
-
-    plt.suptitle(tita, fontsize=16)
-
-    # name = namet + str(int(itt)) + '.png'
-
-    name = namet + "{:03d}.png".format(int(itt))
-
-    plt.savefig(name)
-
-    # plt.show()
-    plt.clf()
-
-
-def Plot_impedance(trueF1, nx, ny, namet, itt, dt, MAXZ, steppi, injectors, producers):
-    progressBar = "\rPlotting Progress: " + ProgressBar(steppi - 1, itt - 1, steppi - 1)
-    ShowBar(progressBar)
-    time.sleep(1)
-
-    Ip = trueF1
-
-    XX, YY = np.meshgrid(np.arange(nx), np.arange(ny))
-    plt.figure(figsize=(12, 12))
-
-    plt.pcolormesh(XX.T, YY.T, Ip, cmap="jet")
-    plt.title(r"$I_{p}$", fontsize=16, weight="bold")
-    plt.ylabel("Y", fontsize=16)
-    plt.xlabel("X", fontsize=16)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(r"$I_{p}$", fontsize=16)
-    # Add_marker2(plt,XX,YY,wells)
-
-    Add_marker2(plt, XX, YY, injectors, producers)
-
-    # plt.tight_layout(rect = [0,0,1,0.95])
-
-    tita = "Seismic survey timestep --" + str(int((itt + 1) * dt * MAXZ)) + " days"
-
-    plt.suptitle(tita, fontsize=16)
-
-    # name = namet + str(int(itt)) + '.png'
-
-    name = namet + "{:03d}.png".format(int(itt))
-    plt.savefig(name)
-    # plt.show()
-    plt.clf()
-
-
-def Plot_performance2(trueF, nx, ny, namet, itt, dt, MAXZ, steppi, wells):
-    progressBar = "\rPlotting Progress: " + ProgressBar(steppi - 1, itt - 1, steppi - 1)
-    ShowBar(progressBar)
-    time.sleep(1)
-
-    lookf = trueF[itt, :, :]
-    lookf_sat = trueF[itt + steppi, :, :]
-    lookf_oil = trueF[itt + 2 * steppi, :, :]
-    lookf_gas = 1 - (lookf_sat + lookf_oil)
-
-    XX, YY = np.meshgrid(np.arange(nx), np.arange(ny))
-    plt.figure(figsize=(12, 12))
-
-    plt.subplot(2, 2, 1)
-    plt.pcolormesh(XX.T, YY.T, lookf, cmap="jet")
-    plt.title("Pressure CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" Pressure (psia)", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.subplot(2, 2, 2)
-    plt.pcolormesh(XX.T, YY.T, lookf_sat, cmap="jet")
-    plt.title("water_sat CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" water sat", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.subplot(2, 2, 3)
-    plt.pcolormesh(XX.T, YY.T, lookf_oil, cmap="jet")
-    plt.title("oil_sat CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" oil sat", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.subplot(2, 2, 4)
-    plt.pcolormesh(XX.T, YY.T, lookf_gas, cmap="jet")
-    plt.title("gas_sat CFD", fontsize=13)
-    plt.ylabel("Y", fontsize=13)
-    plt.xlabel("X", fontsize=13)
-    plt.axis([0, (nx - 1), 0, (ny - 1)])
-    plt.gca().set_xticks([])
-    plt.gca().set_yticks([])
-    cbar1 = plt.colorbar()
-    cbar1.ax.set_ylabel(" gas sat", fontsize=13)
-    Add_marker(plt, XX, YY, wells)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    tita = "Timestep --" + str(int((itt + 1) * dt * MAXZ)) + " days"
-
-    plt.suptitle(tita, fontsize=16)
-
-    name = namet + str(int(itt)) + ".png"
-    plt.savefig(name)
-    # plt.show()
-    plt.clf()
-
-
-# Geostatistics module
-
-
-def intial_ensemble(Nx, Ny, Nz, N, permx):
-    """
-    Geostatistics module
-    Function to generate an initial ensemble of permeability fields using Multiple-Point Statistics (MPS)
-    Parameters:
-        Nx: an integer representing the number of grid cells in the x-direction
-        Ny: an integer representing the number of grid cells in the y-direction
-        Nz: an integer representing the number of grid cells in the z-direction
-        N: an integer representing the number of realizations in the ensemble
-        permx: a numpy array representing the permeability field TI
-
-    Return:
-        ensemble: a numpy array representing the ensemble of permeability fields
-    """
-
-    # import MPSlib
-    O = mps.mpslib()
-
-    # set the MPS method to 'mps_snesim_tree'
-    O = mps.mpslib(method="mps_snesim_tree")
-
-    # set the number of realizations to N
-    O.par["n_real"] = N
-
-    # set the permeability field TI
-    k = permx
-    kjenn = k
-    O.ti = kjenn
-
-    # set the simulation grid size
-    O.par["simulation_grid_size"] = (Ny, Nx, Nz)
-
-    # run MPS simulation in parallel
-    O.run_parallel()
-
-    # get the ensemble of realizations
-    ensemble = O.sim
-
-    # reformat the ensemble
-    ens = []
-    for kk in range(N):
-        temp = np.reshape(ensemble[kk], (-1, 1), "F")
-        ens.append(temp)
-    ensemble = np.hstack(ens)
-
-    # remove temporary files generated during MPS simulation
-    from glob import glob
-
-    for f3 in glob("thread*"):
-        rmtree(f3)
-
-    for f4 in glob("*mps_snesim_tree_*"):
-        os.remove(f4)
-
-    for f4 in glob("*ti_thread_*"):
-        os.remove(f4)
-
-    return ensemble
-
-
-def initial_ensemble_gaussian(Nx, Ny, Nz, N, minn, maxx):
-    """
-    Function to generate an initial ensemble of permeability fields using Gaussian distribution
-    Parameters:
-        Nx: an integer representing the number of grid cells in the x-direction
-        Ny: an integer representing the number of grid cells in the y-direction
-        Nz: an integer representing the number of grid cells in the z-direction
-        N: an integer representing the number of realizations in the ensemble
-        minn: a float representing the minimum value of the permeability field
-        maxx: a float representing the maximum value of the permeability field
-
-    Return:
-        fensemble: a numpy array representing the ensemble of permeability fields
-    """
-
-    shape = (Nx, Ny)
-    distrib = "gaussian"
-
-    fensemble = np.zeros((Nx * Ny * Nz, N))
-
-    for k in range(N):
-        fout = []
-
-        # generate a 3D field
-        for j in range(Nz):
-            field = generate_field(distrib, Pkgen(3), shape)
-            field = imresize(field, output_shape=shape)
-            foo = np.reshape(field, (-1, 1), "F")
-            fout.append(foo)
-
-        fout = np.vstack(fout)
-
-        # scale the field to the desired range
-        clfy = MinMaxScaler(feature_range=(minn, maxx))
-        (clfy.fit(fout))
-        fout = clfy.transform(fout)
-
-        fensemble[:, k] = np.ravel(fout)
-
-    return fensemble
-
-
-def Pkgen(n):
-    def Pk(k):
-        return np.power(k, -n)
-
-    return Pk
-
-
-# Draw samples from a normal distribution
-def distrib(shape):
-    a = np.random.normal(loc=0, scale=1, size=shape)
-    b = np.random.normal(loc=0, scale=1, size=shape)
-    return a + 1j * b
 
 
 def Peaceman_well(
@@ -1574,1493 +394,1244 @@ def Peaceman_well(
     Returns:
     - overr (numpy array): an array containing the time and flow rates (in BHP, qoil, qwater, and wct) for each time step
     """
+    # ------------------------------------------------------------------
+    # 1.  Move all inputs to GPU once
+    # ------------------------------------------------------------------
+    NecessaryI = cp.asarray(NecessaryI, dtype=cp.float32)   # (Ni_cells, 2)
+    NecessaryP = cp.asarray(NecessaryP, dtype=cp.float32)   # (Np_cells, 3)
 
-    # ct1[0,:,:] =  at1[:,:,0] # permeability
-    # ct1[1,:,:] = quse1[:,:,0]#/UIR # Overall f
-    # ct1[2,:,:] = A1[:,:,0]#/UIR# f for water injection
-    # ct1[3,:,:] =  at2[:,:,0] # porosity
+    # Pressure and saturation fields on GPU: (steppi, N_cells)
     if nz == 1:
-        Injector_location = np.where(inn[0, 1, :, :].ravel() > 0)[0]
-        producer_location = np.where(inn[0, 1, :, :].ravel() < 0)[0]
-        PERM = np.reshape(inn[0, 0, :, :], (-1,), "F")
+        P_all = cp.asarray(ooutp[:, :steppi, :, :],
+                           dtype=cp.float32).reshape(-1, steppi, order="C")   # wrong axis — fix:
+        # ooutp shape: (N_ens, steppi, nx, ny)  → we want (steppi, N_cells)
+        P_all = cp.asarray(ooutp[0, :steppi, :, :],
+                           dtype=cp.float32).reshape(steppi, -1)              # (steppi, N_cells)
+        S_all = cp.asarray(oouts[0, :steppi, :, :],
+                           dtype=cp.float32).reshape(steppi, -1)
+        perm_flat = cp.asarray(
+            inn[0, 0, :, :].ravel(order="F"), dtype=cp.float32)              # (N_cells,)
+        rate_flat = cp.asarray(
+            inn[0, 1, :, :].ravel(order="F"), dtype=cp.float32)
     else:
-        Injector_location = np.where(inn[0, 1, :, :, :].ravel() > 0)[0]
-        producer_location = np.where(inn[0, 1, :, :, :].ravel() < 0)[0]
-        PERM = np.reshape(inn[0, 0, :, :, :], (-1,), "F")
+        P_all = cp.asarray(ooutp[0, :steppi, :, :, :],
+                           dtype=cp.float32).reshape(steppi, -1)
+        S_all = cp.asarray(oouts[0, :steppi, :, :, :],
+                           dtype=cp.float32).reshape(steppi, -1)
+        perm_flat = cp.asarray(
+            inn[0, 0, :, :, :].ravel(order="F"), dtype=cp.float32)
+        rate_flat = cp.asarray(
+            inn[0, 1, :, :, :].ravel(order="F"), dtype=cp.float32)
 
-    kuse_inj = PERM[Injector_location]
+    # ------------------------------------------------------------------
+    # 2.  Well locations — computed ONCE
+    # ------------------------------------------------------------------
+    inj_loc  = cp.where(rate_flat >  0)[0]   # injector cell indices
+    prod_loc = cp.where(rate_flat <  0)[0]   # producer cell indices
 
-    kuse_prod = PERM[producer_location]
+    kuse_inj  = perm_flat[inj_loc]           # (N_inj_cells,)
+    kuse_prod = perm_flat[prod_loc]          # (N_pr_cells,)
 
-    RE = 0.2 * DX
-    Baa = []
-    Timz = []
+    RE = 0.2 * DX                            # equivalent drainage radius
+
+    # ------------------------------------------------------------------
+    # 3.  Peaceman log-term — computed ONCE (geometry is static)
+    # ------------------------------------------------------------------
+    n_inj_cells = inj_loc.shape[0]
+    n_pr_cells  = prod_loc.shape[0]
+
+    if nz == 1:
+        log_inj  = cp.log(RE / NecessaryI[:, 0]) + NecessaryI[:, 1]   # (Ni,)
+        log_prod = cp.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]   # (Np,)
+        pwf_prod = NecessaryP[:, 2]                                     # (Np,)
+    else:
+        reps_i = int(n_inj_cells  / NecessaryI.shape[0])
+        reps_p = int(n_pr_cells   / NecessaryP.shape[0])
+        log_inj  = (cp.log(RE / cp.tile(NecessaryI[:, 0], reps_i))
+                    + cp.tile(NecessaryI[:, 1], reps_i))
+        log_prod = (cp.log(RE / cp.tile(NecessaryP[:, 0], reps_p))
+                    + cp.tile(NecessaryP[:, 1], reps_p))
+        pwf_prod = cp.tile(NecessaryP[:, 2], reps_p)
+
+    # Peaceman denominator constants (scalar multipliers — computed once)
+    inv_J_oil_const   = (UO * BO) / (2.0 * cp.pi * DZ)    # multiply by (log/k/kr)
+    inv_J_water_const = (UW * BW) / (2.0 * cp.pi * DZ)
+
+    # ------------------------------------------------------------------
+    # 4.  Output arrays pre-allocated on GPU
+    # ------------------------------------------------------------------
+    BHP_out    = cp.zeros((steppi, N_inj),  dtype=cp.float32)
+    qoil_out   = cp.zeros((steppi, N_pr),   dtype=cp.float32)
+    qwater_out = cp.zeros((steppi, N_pr),   dtype=cp.float32)
+    wct_out    = cp.zeros((steppi, N_pr),   dtype=cp.float32)
+    timz_out   = cp.zeros((steppi, 1),      dtype=cp.float32)
+
+    # ------------------------------------------------------------------
+    # 5.  Vectorised loop over timesteps
+    #     (inner ops are all CuPy — no host transfers per step)
+    # ------------------------------------------------------------------
+    denom_sw = 1.0 - SWI - SWR   # scalar
+
     for kk in range(steppi):
-        if nz == 1:
-            Ptito = ooutp[:, kk, :, :]
-            Stito = oouts[:, kk, :, :]
-        else:
-            Ptito = ooutp[:, kk, :, :, :]
-            Stito = oouts[:, kk, :, :, :]
+        # Pressure and saturation at this timestep
+        p_cells = P_all[kk]                          # (N_cells,)
+        s_cells = S_all[kk]                          # (N_cells,)
 
-        # average_pressure = np.mean(Ptito.ravel()) * pini_alt
-        average_pressure = Ptito.ravel()[producer_location]
-        p_inj = Ptito.ravel()[Injector_location]
-        # p_prod = (Ptito.ravel()[producer_location] ) * pini_alt
+        # Brooks-Corey rel-perms (vectorised)
+        Sw_norm = (s_cells - SWI) / denom_sw         # (N_cells,)
+        Krw_all = Sw_norm ** 2
+        Kro_all = (1.0 - Sw_norm) ** 2
 
-        S = Stito.ravel().reshape(-1, 1)
+        # Well-cell values
+        krw_inj  = Krw_all[inj_loc]                  # (N_inj_cells,)
+        krw_prod = Krw_all[prod_loc]                  # (N_pr_cells,)
+        kro_prod = Kro_all[prod_loc]
 
-        Sout = (S - SWI) / (1 - SWI - SWR)
-        Krw = Sout**2  # Water mobility
-        Kro = (1 - Sout) ** 2  # Oil mobility
-        krwuse = Krw.ravel()[Injector_location]
-        krwusep = Krw.ravel()[producer_location]
+        p_inj  = p_cells[inj_loc]                    # (N_inj_cells,)
+        p_prod = p_cells[prod_loc]                   # (N_pr_cells,)
 
-        krouse = Kro.ravel()[producer_location]
+        # --- BHP at injectors -----------------------------------------
+        # Pwf = p_inj + (μW BW) / (2π k krw DZ) * log_term
+        temp = inv_J_water_const * log_inj / (kuse_inj * krw_inj)
+        Pwf  = cp.abs(p_inj + temp)
+        # Average over nz layers per injector
+        BHP_out[kk] = cp.sum(
+            Pwf.reshape(-1, N_inj, order="C"), axis=0) / nz
 
-        up = UW * BW
-        down = 2 * np.pi * kuse_inj * krwuse * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryI[:, 0]) + NecessaryI[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryI[:, 0],
-                    int(Injector_location.size / NecessaryI[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryI[:, 1], int(Injector_location.size / NecessaryI[:, 1].size)
-            )
-        temp = (up / down) * right
-        # temp[temp ==-inf] = 0
-        Pwf = p_inj + temp
-        Pwf = np.abs(Pwf)
-        BHP = np.sum(np.reshape(Pwf, (-1, N_inj), "C"), axis=0) / nz
+        # --- Oil production rate --------------------------------------
+        J_oil      = (2.0 * cp.pi * kuse_prod * kro_prod * DZ
+                      / (inv_J_oil_const * log_prod / (UO * BO)))
+        # Simplify: J = (2π k kr DZ) / (μ B log_term)
+        J_oil      = (2.0 * cp.pi * kuse_prod * kro_prod * DZ
+                      / ((UO * BO) * log_prod))
+        drawdown   = p_prod - pwf_prod
+        qoil_cells = cp.abs(drawdown * J_oil)
+        qoil_out[kk] = cp.sum(
+            qoil_cells.reshape(-1, N_pr, order="C"), axis=0) / nz
 
-        up = UO * BO
-        down = 2 * np.pi * kuse_prod * krouse * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryP[:, 0],
-                    int(producer_location.size / NecessaryP[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryP[:, 1], int(producer_location.size / NecessaryP[:, 1].size)
-            )
-        J = down / (up * right)
-        # drawdown = p_prod - pwf_producer
-        if nz == 1:
-            drawdown = average_pressure - NecessaryP[:, 2]
-        else:
-            drawdown = average_pressure - np.tile(
-                NecessaryP[:, 2], int(producer_location.size / NecessaryP[:, 1].size)
-            )
-        qoil = np.abs(-(drawdown * J))
-        qoil = np.sum(np.reshape(qoil, (-1, N_pr), "C"), axis=0) / nz
+        # --- Water production rate ------------------------------------
+        J_water      = (2.0 * cp.pi * kuse_prod * krw_prod * DZ
+                        / ((UW * BW) * log_prod))
+        qwater_cells = cp.abs(drawdown * J_water)
+        qwater_out[kk] = cp.sum(
+            qwater_cells.reshape(-1, N_pr, order="C"), axis=0) / nz
 
-        up = UW * BW
-        down = 2 * np.pi * kuse_prod * krwusep * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryP[:, 0],
-                    int(producer_location.size / NecessaryP[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryP[:, 1], int(producer_location.size / NecessaryP[:, 1].size)
-            )
-        J = down / (up * right)
-        # drawdown = p_prod - pwf_producer
-        if nz == 1:
-            drawdown = average_pressure - NecessaryP[:, 2]
-        else:
-            drawdown = average_pressure - np.tile(
-                NecessaryP[:, 2], int(producer_location.size / NecessaryP[:, 2].size)
-            )
-        qwater = np.abs(-(drawdown * J))
-        qwater = np.sum(np.reshape(qwater, (-1, N_pr), "C"), axis=0) / nz
-        # qwater[qwater==0] = 0
+        # --- Water cut -------------------------------------------------
+        wct_out[kk] = (qwater_out[kk]
+                       / (qwater_out[kk] + qoil_out[kk] + 1e-10)) * 100.0
 
-        # water cut
-        wct = (qwater / (qwater + qoil)) * np.float32(100)
+        # --- Time stamp -----------------------------------------------
+        timz_out[kk, 0] = ((kk + 1) * dt) * MAXZ
 
-        timz = ((kk + 1) * dt) * MAXZ
-        # timz = timz.reshape(1,1)
-        qs = [BHP, qoil, qwater, wct]
-        # print(qs.shape)
-        qs = np.asarray(qs)
-        qs = qs.reshape(1, -1)
+    # ------------------------------------------------------------------
+    # 6.  Assemble output — single host transfer
+    # ------------------------------------------------------------------
+    # overr shape: (steppi, 1 + N_inj + N_pr + N_pr + N_pr)
+    Big = cp.hstack([timz_out, BHP_out, qoil_out, qwater_out, wct_out])
+    return cp.asnumpy(Big)
 
-        Baa.append(qs)
-        Timz.append(timz)
-    Baa = np.vstack(Baa)
-    Timz = np.vstack(Timz)
-
-    overr = np.hstack([Timz, Baa])
-
-    return overr  # np.vstack(B)
 
 
 def Peaceman_well2(
-    inn,
-    ooutp,
-    oouts,
-    ooutsoil,
-    outg,
-    MAXZ,
-    mazw,
-    s1,
-    DX,
-    steppi,
-    pini_alt,
-    SWI,
-    SWR,
-    UW,
-    BW,
-    DZ,
-    rwell,
-    skin,
-    UO,
-    BO,
-    UG,
-    BG,
-    pwf_producer,
-    dt,
-    N_inj,
-    N_pr,
-    nz,
-    NecessaryI,
-    NecessaryP,
-    SWOW,
-    SWOG,
-    PB,
+    inn, ooutp, oouts, ooutsoil, outg,
+    MAXZ, mazw, s1, DX, steppi, pini_alt,
+    SWI, SWR, UW, BW, DZ, rwell, skin,
+    UO, BO, UG, BG,
+    pwf_producer, dt, N_inj, N_pr, nz,
+    NecessaryI, NecessaryP,
+    SWOW, SWOG, PB,
 ):
-    # ct1[0,:,:] =  at1[:,:,0] # permeability
-    # ct1[1,:,:] = quse1[:,:,0]#/UIR # Overall f
-    # ct1[2,:,:] = A1[:,:,0]#/UIR# f for water injection
-    # ct1[3,:,:] =  at2[:,:,0] # porosity
+    """
+    Three-phase (water/oil/gas) Peaceman well model — fully GPU-vectorised.
+
+    Parameters
+    ----------
+    inn        : ndarray (1, 2+, nx, ny[, nz])  — perm[0], rate[1]
+    ooutp      : ndarray (1, steppi, nx, ny[,nz]) — pressure
+    oouts      : ndarray (1, steppi, nx, ny[,nz]) — water saturation
+    ooutsoil   : ndarray (1, steppi, nx, ny[,nz]) — oil saturation   ← was IGNORED
+    outg       : ndarray (1, steppi, nx, ny[,nz]) — gas saturation
+    SWOW       : cupy.ndarray (M,3) — [Sw, Krow, Krw]
+    SWOG       : cupy.ndarray (M,3) — [Sg, Krog, Krg]
+    PB         : float — bubble-point pressure for RS/BG correlations
+
+    Returns
+    -------
+    overr : numpy.ndarray (steppi, 1 + N_inj + 4*N_pr)
+        Columns: [time, BHP..., qoil..., qwater..., qgas..., wct...]
+    """
+
+    # ------------------------------------------------------------------
+    # 1.  Move static inputs to GPU once
+    # ------------------------------------------------------------------
+    SWOW = cp.asarray(SWOW, dtype=cp.float32)
+    SWOG = cp.asarray(SWOG, dtype=cp.float32)
+    NecessaryI = cp.asarray(NecessaryI, dtype=cp.float32)
+    NecessaryP = cp.asarray(NecessaryP, dtype=cp.float32)
+
     if nz == 1:
-        Injector_location = np.where(inn[0, 1, :, :].ravel() > 0)[0]
-        producer_location = np.where(inn[0, 1, :, :].ravel() < 0)[0]
-        PERM = np.reshape(inn[0, 0, :, :], (-1,), "F")
+        P_all   = cp.asarray(ooutp[0,    :steppi, :, :],    dtype=cp.float32).reshape(steppi, -1)
+        Sw_all  = cp.asarray(oouts[0,    :steppi, :, :],    dtype=cp.float32).reshape(steppi, -1)
+        So_all  = cp.asarray(ooutsoil[0, :steppi, :, :],    dtype=cp.float32).reshape(steppi, -1)
+        Sg_all  = cp.asarray(outg[0,     :steppi, :, :],    dtype=cp.float32).reshape(steppi, -1)
+        perm_flat = cp.asarray(inn[0, 0, :, :].ravel(order="F"),   dtype=cp.float32)
+        rate_flat = cp.asarray(inn[0, 1, :, :].ravel(order="F"),   dtype=cp.float32)
     else:
-        Injector_location = np.where(inn[0, 1, :, :, :].ravel() > 0)[0]
-        producer_location = np.where(inn[0, 1, :, :, :].ravel() < 0)[0]
-        PERM = np.reshape(inn[0, 0, :, :, :], (-1,), "F")
+        P_all   = cp.asarray(ooutp[0,    :steppi, :, :, :], dtype=cp.float32).reshape(steppi, -1)
+        Sw_all  = cp.asarray(oouts[0,    :steppi, :, :, :], dtype=cp.float32).reshape(steppi, -1)
+        So_all  = cp.asarray(ooutsoil[0, :steppi, :, :, :], dtype=cp.float32).reshape(steppi, -1)
+        Sg_all  = cp.asarray(outg[0,     :steppi, :, :, :], dtype=cp.float32).reshape(steppi, -1)
+        perm_flat = cp.asarray(inn[0, 0, :, :, :].ravel(order="F"), dtype=cp.float32)
+        rate_flat = cp.asarray(inn[0, 1, :, :, :].ravel(order="F"), dtype=cp.float32)
 
-    kuse_inj = PERM[Injector_location]
+    # ------------------------------------------------------------------
+    # 2.  Well locations — computed ONCE
+    # ------------------------------------------------------------------
+    inj_loc  = cp.where(rate_flat >  0)[0]
+    prod_loc = cp.where(rate_flat <  0)[0]
 
-    kuse_prod = PERM[producer_location]
+    kuse_inj  = perm_flat[inj_loc]
+    kuse_prod = perm_flat[prod_loc]
 
-    RE = 0.2 * DX
-    Baa = []
-    Timz = []
+    RE      = 0.2 * DX
+    denom_s = 1.0 - SWI - SWR   # scalar
+
+    # ------------------------------------------------------------------
+    # 3.  Static Peaceman log-terms — computed ONCE
+    # ------------------------------------------------------------------
+    n_inj_cells = int(inj_loc.shape[0])
+    n_pr_cells  = int(prod_loc.shape[0])
+
+    if nz == 1:
+        log_inj  = cp.log(RE / NecessaryI[:, 0]) + NecessaryI[:, 1]
+        log_prod = cp.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]
+        pwf_prod = NecessaryP[:, 2]
+    else:
+        reps_i   = int(n_inj_cells  / NecessaryI.shape[0])
+        reps_p   = int(n_pr_cells   / NecessaryP.shape[0])
+        log_inj  = cp.log(RE / cp.tile(NecessaryI[:, 0], reps_i)) + cp.tile(NecessaryI[:, 1], reps_i)
+        log_prod = cp.log(RE / cp.tile(NecessaryP[:, 0], reps_p)) + cp.tile(NecessaryP[:, 1], reps_p)
+        pwf_prod = cp.tile(NecessaryP[:, 2], reps_p)
+
+    # Precompute table derivatives for consistent Kr derivatives (on GPU)
+    sw_tab = SWOW[:, 0];  sg_tab = SWOG[:, 0]
+
+    # ------------------------------------------------------------------
+    # 4.  Output buffers — pre-allocated on GPU
+    # ------------------------------------------------------------------
+    BHP_out    = cp.zeros((steppi, N_inj), dtype=cp.float32)
+    qoil_out   = cp.zeros((steppi, N_pr),  dtype=cp.float32)
+    qwater_out = cp.zeros((steppi, N_pr),  dtype=cp.float32)
+    qgas_out   = cp.zeros((steppi, N_pr),  dtype=cp.float32)
+    wct_out    = cp.zeros((steppi, N_pr),  dtype=cp.float32)
+    timz_out   = cp.zeros((steppi, 1),     dtype=cp.float32)
+
+    # ------------------------------------------------------------------
+    # 5.  Main loop — all ops on GPU, no host transfers per step
+    # ------------------------------------------------------------------
     for kk in range(steppi):
-        if nz == 1:
-            Ptito = ooutp[:, kk, :, :]
-            Stito = oouts[:, kk, :, :]
-            ooutsoil[:, kk, :, :]
-            Stitogas = outg[:, kk, :, :]
-        else:
-            Ptito = ooutp[:, kk, :, :, :]
-            Stito = oouts[:, kk, :, :, :]
-            ooutsoil[:, kk, :, :, :]
-            Stitogas = outg[:, kk, :, :, :]
 
-        # average_pressure = np.mean(Ptito.ravel()) * pini_alt
-        average_pressure = Ptito.ravel()[producer_location]
-        p_inj = Ptito.ravel()[Injector_location]
-        # p_prod = (Ptito.ravel()[producer_location] ) * pini_alt
+        p_cells  = P_all[kk]           # (N_cells,)
+        sw       = Sw_all[kk]          # (N_cells,)  water sat
+        so       = So_all[kk]          # (N_cells,)  oil sat   ← FIXED (was=sw)
+        sg       = Sg_all[kk]          # (N_cells,)  gas sat
 
-        S = Stito.ravel().reshape(-1, 1)
-        Soil = Stito.ravel().reshape(-1, 1)
-        Sg = Stitogas.ravel().reshape(-1, 1)
+        # --- Three-phase rel-perms via table interpolation -------------
+        sw_col = sw.reshape(-1, 1)
+        sg_col = sg.reshape(-1, 1)
 
-        Sa = S
-        soil = Soil
-        # soil=cp.ravel(soil)
+        KROW = interp(sw_col, sw_tab, SWOW[:, 1]).ravel()   # oil kr vs Sw
+        KRW  = interp(sw_col, sw_tab, SWOW[:, 2]).ravel()   # water kr vs Sw
+        KROG = interp(sg_col, sg_tab, SWOG[:, 1]).ravel()   # oil kr vs Sg
+        KRG  = interp(sg_col, sg_tab, SWOG[:, 2]).ravel()   # gas kr vs Sg
 
-        so = (soil - SWR) / (1 - SWI - SWR)
-        sw = (Sa - SWI) / (1 - SWI - SWR)
-        sg = (Sg) / (1 - SWI - SWR)
+        # Baker's linear KRO (consistent with RelPerm3)
+        So_norm = cp.clip(so / denom_s, 0.0, 1.0)
+        KRO     = So_norm * KROW * KROG                      # (N_cells,)
 
-        SOD = so
-        SWD = sw
-        SGD = sg
+        # --- Well-cell values ------------------------------------------
+        krw_inj  = KRW[inj_loc]
+        krw_prod = KRW[prod_loc]
+        kro_prod = KRO[prod_loc]
+        krg_prod = KRG[prod_loc]
 
-        KROW = interp(cp.asarray(Sa.reshape(-1, 1)), SWOW[:, 0], SWOW[:, 1])
-        KRW = interp(cp.asarray(Sa.reshape(-1, 1)), SWOW[:, 0], SWOW[:, 2])
+        p_inj    = p_cells[inj_loc]
+        p_prod   = p_cells[prod_loc]
 
-        KROG = interp(cp.asarray(Sg.reshape(-1, 1)), SWOG[:, 0], SWOG[:, 1])
-        KRG = interp(cp.asarray(Sg.reshape(-1, 1)), SWOG[:, 0], SWOG[:, 2])
-
-        KRW = cp.asnumpy(KRW.reshape(-1, 1))
-        KRG = KRG.reshape(-1, 1).get()
-        KROW = KROW.reshape(-1, 1).get()
-        KROG = KROG.reshape(-1, 1).get()
-
-        sod = SOD.reshape(-1, 1)
-        a = KROW / (1 - SWD)
-        b = KROG / (1 - SGD)
-        KRO = a * b * sod
-
-        Krw = KRW
-        Kro = KRO
-        Krg = KRG
-
-        Ppz = np.mean(Ptito.ravel())
-
-        RS = np.float32(np.ndarray.item(cp.asnumpy(calc_rs(PB, Ppz))))
-
-        krwuse = Krw.ravel()[Injector_location]
-        krwusep = Krw.ravel()[producer_location]
-        krouse = Kro.ravel()[producer_location]
-        Krg.ravel()[producer_location]
-
-        up = UW * BW
-        down = 2 * np.pi * kuse_inj * krwuse * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryI[:, 0]) + NecessaryI[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryI[:, 0],
-                    int(Injector_location.size / NecessaryI[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryI[:, 1], int(Injector_location.size / NecessaryI[:, 1].size)
-            )
-        temp = (up / down) * right
-        # temp[temp ==-inf] = 0
-        Pwf = p_inj + temp
-        Pwf = np.abs(Pwf)
-        BHP = np.sum(np.reshape(Pwf, (-1, N_inj), "C"), axis=0) / nz
-
-        up = UO * BO
-        down = 2 * np.pi * kuse_prod * krouse * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryP[:, 0],
-                    int(producer_location.size / NecessaryP[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryP[:, 1], int(producer_location.size / NecessaryP[:, 1].size)
-            )
-        J = down / (up * right)
-        # drawdown = p_prod - pwf_producer
-        if nz == 1:
-            drawdown = average_pressure - NecessaryP[:, 2]
-        else:
-            drawdown = average_pressure - np.tile(
-                NecessaryP[:, 2], int(producer_location.size / NecessaryP[:, 2].size)
-            )
-        qoil = np.abs(-(drawdown * J))
-        qoil = np.sum(np.reshape(qoil, (-1, N_pr), "C"), axis=0) / nz
-
-        up = UW * BW
-        down = 2 * np.pi * kuse_prod * krwusep * DZ
-        if nz == 1:
-            right = np.log(RE / NecessaryP[:, 0]) + NecessaryP[:, 1]
-        else:
-            right = np.log(
-                RE
-                / np.tile(
-                    NecessaryP[:, 0],
-                    int(producer_location.size / NecessaryP[:, 0].size),
-                )
-            ) + np.tile(
-                NecessaryP[:, 1], int(producer_location.size / NecessaryP[:, 1].size)
-            )
-        J = down / (up * right)
-        # drawdown = p_prod - pwf_producer
-        if nz == 1:
-            drawdown = average_pressure - NecessaryP[:, 2]
-        else:
-            drawdown = average_pressure - np.tile(
-                NecessaryP[:, 2], int(producer_location.size / NecessaryP[:, 2].size)
-            )
-        qwater = np.abs(-(drawdown * J))
-        qwater = np.sum(np.reshape(qwater, (-1, N_pr), "C"), axis=0) / nz
-        # qwater[qwater==0] = 0
-
-        # up = UG * BG
-        # up = up.get()
-        # down = 2*np.pi * kuse_prod * krguse * DZ
-        # if nz ==1:
-        #     right = np.log(RE/NecessaryP[:,0]) + NecessaryP[:,1]
-        # else:
-        #     right = np.log(RE/np.tile(NecessaryP[:,0], int(producer_location.size/NecessaryP[:,0].size))) \
-        # + np.tile(NecessaryP[:,1],int(producer_location.size/NecessaryP[:,1].size))
-        # J = down/(up*right)
-        # #drawdown = p_prod - pwf_producer
-        # if nz ==1:
-        #     drawdown = average_pressure - NecessaryP[:,2]
-        # else:
-        #     drawdown = average_pressure - np.tile(NecessaryP[:,2], int(producer_location.size/NecessaryP[:,2].size))
-        # qgas = np.abs(-(drawdown*J))
-        # qgas = np.sum(np.reshape(qgas,(-1,N_pr),'C'),axis=0)/nz
-
-        qgas = RS * qoil
-
-        # water cut
-        wct = (qwater / (qwater + qoil)) * np.float32(100)
-
-        timz = ((kk + 1) * dt) * MAXZ
-        # timz = timz.reshape(1,1)
-        qs = [BHP, qoil, qwater, qgas, wct]
-        # print(qs.shape)
-        qs = np.asarray(qs)
-        qs = qs.reshape(1, -1)
-
-        Baa.append(qs)
-        Timz.append(timz)
-    Baa = np.vstack(Baa)
-    Timz = np.vstack(Timz)
-
-    overr = np.hstack([Timz, Baa])
-
-    return overr  # np.vstack(B)
-
-
-# Points generation
-
-
-def test_points_gen(n_test, nder, interval=(-1.0, 1.0), distrib="random", **kwargs):
-    return {
-        "random": lambda n_test, nder: (interval[1] - interval[0])
-        * np.random.rand(n_test, nder)
-        + interval[0],
-        "lhs": lambda n_test, nder: (interval[1] - interval[0])
-        * lhs(nder, samples=n_test, **kwargs)
-        + interval[0],
-    }[distrib.lower()](n_test, nder)
-
-
-def smoothn(
-    y,
-    nS0=10,
-    axis=None,
-    smoothOrder=2.0,
-    sd=None,
-    verbose=False,
-    s0=None,
-    z0=None,
-    isrobust=False,
-    W=None,
-    s=None,
-    MaxIter=100,
-    TolZ=1e-3,
-    weightstr="bisquare",
-):
-    if type(y) == ma.core.MaskedArray:  # masked array
-        # is_masked = True
-        mask = y.mask
-        y = np.array(y)
-        y[mask] = 0.0
-        if np.any(W is not None):
-            W = np.array(W)
-            W[mask] = 0.0
-        if np.any(sd is not None):
-            W = np.array(1.0 / sd**2)
-            W[mask] = 0.0
-            sd = None
-        y[mask] = np.nan
-
-    if np.any(sd is not None):
-        sd_ = np.array(sd)
-        mask = sd > 0.0
-        W = np.zeros_like(sd_)
-        W[mask] = 1.0 / sd_[mask] ** 2
-        sd = None
-
-    if np.any(W is not None):
-        W = W / W.max()
-
-    sizy = y.shape
-
-    # sort axis
-    if axis is None:
-        axis = tuple(np.arange(y.ndim))
-
-    noe = y.size  # number of elements
-    if noe < 2:
-        z = y
-        exitflag = 0
-        Wtot = 0
-        return z, s, exitflag, Wtot
-    # ---
-    # Smoothness parameter and weights
-    # if s != None:
-    #  s = []
-    if np.all(W is None):
-        W = np.ones(sizy)
-
-    # if z0 == None:
-    #  z0 = y.copy()
-
-    # ---
-    # "Weighting function" criterion
-    weightstr = weightstr.lower()
-    # ---
-    # Weights. Zero weights are assigned to not finite values (Inf or NaN),
-    # (Inf/NaN values = missing data).
-    IsFinite = np.array(np.isfinite(y)).astype(bool)
-    nof = IsFinite.sum()  # number of finite elements
-    W = W * IsFinite
-    if any(W < 0):
-        raise RuntimeError("smoothn:NegativeWeights", "Weights must all be >=0")
-    else:
-        # W = W/np.max(W)
-        pass
-    # ---
-    # Weighted or missing data?
-    isweighted = any(W != 1)
-    # ---
-    # Robust smoothing?
-    # isrobust
-    # ---
-    # Automatic smoothing?
-    isauto = not s
-    # ---
-    # DCTN and IDCTN are required
-    try:
-        from scipy.fftpack.realtransforms import dct, idct
-    except:
-        z = y
-        exitflag = -1
-        Wtot = 0
-        return z, s, exitflag, Wtot
-
-    ## Creation of the Lambda tensor
-    # ---
-    # Lambda contains the eingenvalues of the difference matrix used in this
-    # penalized least squares process.
-    axis = tuple(np.array(axis).flatten())
-    d = y.ndim
-    Lambda = np.zeros(sizy)
-    for i in axis:
-        # create a 1 x d array (so e.g. [1,1] for a 2D case
-        siz0 = np.ones((1, y.ndim))[0].astype(int)
-        siz0[i] = sizy[i]
-        # cos(pi*(reshape(1:sizy(i),siz0)-1)/sizy(i)))
-        # (arange(1,sizy[i]+1).reshape(siz0) - 1.)/sizy[i]
-        Lambda = Lambda + (
-            np.cos(np.pi * (np.arange(1, sizy[i] + 1) - 1.0) / sizy[i]).reshape(siz0)
-        )
-        # else:
-        #  Lambda = Lambda + siz0
-    Lambda = -2.0 * (len(axis) - Lambda)
-    if not isauto:
-        Gamma = 1.0 / (1 + (s * abs(Lambda)) ** smoothOrder)
-
-    ## Upper and lower bound for the smoothness parameter
-    # The average leverage (h) is by definition in [0 1]. Weak smoothing occurs
-    # if h is close to 1, while over-smoothing appears when h is near 0. Upper
-    # and lower bounds for h are given to avoid under- or over-smoothing. See
-    # equation relating h to the smoothness parameter (Equation #12 in the
-    # referenced CSDA paper).
-    N = sum(np.array(sizy) != 1)
-    # tensor rank of the y-array
-    hMin = 1e-6
-    hMax = 0.99
-    # (h/n)**2 = (1 + a)/( 2 a)
-    # a = 1/(2 (h/n)**2 -1)
-    # where a = sqrt(1 + 16 s)
-    # (a**2 -1)/16
-    try:
-        sMinBnd = np.sqrt(
-            (
-                ((1 + np.sqrt(1 + 8 * hMax ** (2.0 / N))) / 4.0 / hMax ** (2.0 / N))
-                ** 2
-                - 1
-            )
-            / 16.0
-        )
-        sMaxBnd = np.sqrt(
-            (
-                ((1 + np.sqrt(1 + 8 * hMin ** (2.0 / N))) / 4.0 / hMin ** (2.0 / N))
-                ** 2
-                - 1
-            )
-            / 16.0
-        )
-    except:
-        sMinBnd = None
-        sMaxBnd = None
-    ## Initialize before iterating
-    # ---
-    Wtot = W
-    # --- Initial conditions for z
-    if isweighted:
-        # --- With weighted/missing data
-        # An initial guess is provided to ensure faster convergence. For that
-        # purpose, a nearest neighbor interpolation followed by a coarse
-        # smoothing are performed.
-        # ---
-        if z0 is not None:  # an initial guess (z0) has been provided
-            z = z0
-        else:
-            z = y  # InitialGuess(y,IsFinite);
-            z[~IsFinite] = 0.0
-    else:
-        z = np.zeros(sizy)
-    # ---
-    z0 = z
-    y[~IsFinite] = 0
-    # arbitrary values for missing y-data
-    # ---
-    tol = 1.0
-    RobustIterativeProcess = True
-    RobustStep = 1
-    nit = 0
-    # --- Error on p. Smoothness parameter s = 10^p
-    errp = 0.1
-    # opt = optimset('TolX',errp);
-    # --- Relaxation factor RF: to speedup convergence
-    RF = 1 + 0.75 * isweighted
-    # ??
-    ## Main iterative process
-    # ---
-    if isauto:
-        try:
-            xpost = np.array([(0.9 * np.log10(sMinBnd) + np.log10(sMaxBnd) * 0.1)])
-        except:
-            np.array([100.0])
-    else:
-        xpost = np.array([np.log10(s)])
-    while RobustIterativeProcess:
-        # --- "amount" of weights (see the function GCVscore)
-        aow = sum(Wtot) / noe
-        # 0 < aow <= 1
-        # ---
-        while tol > TolZ and nit < MaxIter:
-            if verbose:
-                print("tol", tol, "nit", nit)
-            nit = nit + 1
-            DCTy = dctND(Wtot * (y - z) + z, f=dct)
-            if isauto and not np.remainder(np.log2(nit), 1):
-                # ---
-                # The generalized cross-validation (GCV) method is used.
-                # We seek the smoothing parameter s that minimizes the GCV
-                # score i.e. s = Argmin(GCVscore).
-                # Because this process is time-consuming, it is performed from
-                # time to time (when nit is a power of 2)
-                # ---
-                # errp in here somewhere
-
-                # xpost,f,d = lbfgsb.fmin_l_bfgs_b(gcv,xpost,fprime=None,factr=10.,\
-                #   approx_grad=True,bounds=[(log10(sMinBnd),log10(sMaxBnd))],\
-                #   args=(Lambda,aow,DCTy,IsFinite,Wtot,y,nof,noe))
-
-                # if we have no clue what value of s to use, better span the
-                # possible range to get a reasonable starting point ...
-                # only need to do it once though. nS0 is teh number of samples used
-                if not s0:
-                    ss = np.arange(nS0) * (1.0 / (nS0 - 1.0)) * (
-                        np.log10(sMaxBnd) - np.log10(sMinBnd)
-                    ) + np.log10(sMinBnd)
-                    g = np.zeros_like(ss)
-                    for i, p in enumerate(ss):
-                        g[i] = gcv(
-                            p,
-                            Lambda,
-                            aow,
-                            DCTy,
-                            IsFinite,
-                            Wtot,
-                            y,
-                            nof,
-                            noe,
-                            smoothOrder,
-                        )
-                        # print 10**p,g[i]
-                    xpost = [ss[g == g.min()]]
-                    # print '==============='
-                    # print nit,tol,g.min(),xpost[0],s
-                    # print '==============='
-                else:
-                    xpost = [s0]
-                xpost, f, d = lbfgsb.fmin_l_bfgs_b(
-                    gcv,
-                    xpost,
-                    fprime=None,
-                    factr=1e7,
-                    approx_grad=True,
-                    bounds=[(np.log10(sMinBnd), np.log10(sMaxBnd))],
-                    args=(Lambda, aow, DCTy, IsFinite, Wtot, y, nof, noe, smoothOrder),
-                )
-            s = 10 ** xpost[0]
-            # update the value we use for the initial s estimate
-            s0 = xpost[0]
-
-            Gamma = 1.0 / (1 + (s * abs(Lambda)) ** smoothOrder)
-
-            z = RF * dctND(Gamma * DCTy, f=idct) + (1 - RF) * z
-            # if no weighted/missing data => tol=0 (no iteration)
-            tol = isweighted * norm(z0 - z) / norm(z)
-
-            z0 = z
-            # re-initialization
-        exitflag = nit < MaxIter
-
-        if isrobust:  # -- Robust Smoothing: iteratively re-weighted process
-            # --- average leverage
-            h = np.sqrt(1 + 16.0 * s)
-            h = np.sqrt(1 + h) / np.sqrt(2) / h
-            h = h**N
-            # --- take robust weights into account
-            Wtot = W * RobustWeights(y - z, IsFinite, h, weightstr)
-            # --- re-initialize for another iterative weighted process
-            isweighted = True
-            tol = 1
-            nit = 0
-            # ---
-            RobustStep = RobustStep + 1
-            RobustIterativeProcess = RobustStep < 3
-            # 3 robust steps are enough.
-        else:
-            RobustIterativeProcess = False
-            # stop the whole process
-
-    ## Warning messages
-    # ---
-    if isauto:
-        if abs(np.log10(s) - np.log10(sMinBnd)) < errp:
-            warning(
-                "MATLAB:smoothn:SLowerBound",
-                [
-                    "s = %.3f " % (s)
-                    + ": the lower bound for s "
-                    + "has been reached. Put s as an input variable if required."
-                ],
-            )
-        elif abs(np.log10(s) - np.log10(sMaxBnd)) < errp:
-            warning(
-                "MATLAB:smoothn:SUpperBound",
-                [
-                    "s = %.3f " % (s)
-                    + ": the upper bound for s "
-                    + "has been reached. Put s as an input variable if required."
-                ],
-            )
-    return z, s, exitflag, Wtot
-
-
-def warning(s1, s2):
-    print(s1)
-    print(s2[0])
-
-
-## GCV score
-# ---
-# function GCVscore = gcv(p)
-def gcv(p, Lambda, aow, DCTy, IsFinite, Wtot, y, nof, noe, smoothOrder):
-    # Search the smoothing parameter s that minimizes the GCV score
-    # ---
-    s = 10**p
-    Gamma = 1.0 / (1 + (s * abs(Lambda)) ** smoothOrder)
-    # --- RSS = Residual sum-of-squares
-    if aow > 0.9:  # aow = 1 means that all of the data are equally weighted
-        # very much faster: does not require any inverse DCT
-        RSS = norm(DCTy * (Gamma - 1.0)) ** 2
-    else:
-        # take account of the weights to calculate RSS:
-        yhat = dctND(Gamma * DCTy, f=idct)
-        RSS = norm(np.sqrt(Wtot[IsFinite]) * (y[IsFinite] - yhat[IsFinite])) ** 2
-    # ---
-    TrH = sum(Gamma)
-    GCVscore = RSS / float(nof) / (1.0 - TrH / float(noe)) ** 2
-    return GCVscore
-
-
-## Robust weights
-# function W = RobustWeights(r,I,h,wstr)
-def RobustWeights(r, I, h, wstr):
-    # weights for robust smoothing.
-    MAD = np.median(abs(r[I] - np.median(r[I])))
-    # median absolute deviation
-    u = abs(r / (1.4826 * MAD) / np.sqrt(1 - h))
-    # studentized residuals
-    if wstr == "cauchy":
-        c = 2.385
-        W = 1.0 / (1 + (u / c) ** 2)
-        # Cauchy weights
-    elif wstr == "talworth":
-        c = 2.795
-        W = u < c
-        # Talworth weights
-    else:
-        c = 4.685
-        W = (1 - (u / c) ** 2) ** 2.0 * ((u / c) < 1)
-        # bisquare weights
-
-    W[np.isnan(W)] = 0
-    return W
-
-
-## Initial Guess with weighted/missing data
-# function z = InitialGuess(y,I)
-def InitialGuess(y, I):
-    # -- nearest neighbor interpolation (in case of missing values)
-    if any(~I):
-        try:
-            from scipy.ndimage.morphology import distance_transform_edt
-
-            # if license('test','image_toolbox')
-            # [z,L] = bwdist(I);
-            L = distance_transform_edt(1 - I)
-            z = y
-            z[~I] = y[L[~I]]
-        except:
-            # If BWDIST does not exist, NaN values are all replaced with the
-            # same scalar. The initial guess is not optimal and a warning
-            # message thus appears.
-            z = y
-            z[~I] = np.mean(y[I])
-    else:
-        z = y
-    # coarse fast smoothing
-    z = dctND(z, f=dct)
-    k = np.array(z.shape)
-    m = np.ceil(k / 10) + 1
-    d = []
-    for i in np.xrange(len(k)):
-        d.append(np.arange(m[i], k[i]))
-    d = np.array(d).astype(int)
-    z[d] = 0.0
-    z = dctND(z, f=idct)
-    return z
-
-
-def dctND(data, f=dct):
-    nd = len(data.shape)
-    if nd == 1:
-        return f(data, norm="ortho", type=2)
-    elif nd == 2:
-        return f(f(data, norm="ortho", type=2).T, norm="ortho", type=2).T
-    elif nd == 3:
-        return f(
-            f(f(data, norm="ortho", type=2, axis=0), norm="ortho", type=2, axis=1),
-            norm="ortho",
-            type=2,
-            axis=2,
-        )
-    elif nd == 4:
-        return f(
-            f(
-                f(f(data, norm="ortho", type=2, axis=0), norm="ortho", type=2, axis=1),
-                norm="ortho",
-                type=2,
-                axis=2,
-            ),
-            norm="ortho",
-            type=2,
-            axis=3,
+        # --- RS per producer cell (pressure-dependent) -----------------
+        # Fix: compute RS at each producer cell pressure, not mean pressure
+        RS_prod  = cp.asarray(
+            [float(calc_rs(PB, float(pp))) for pp in cp.asnumpy(p_prod)],
+            dtype=cp.float32
         )
 
+        # --- BHP at injectors ------------------------------------------
+        # Pwf = p_inj + (μW BW / (2π k krw DZ)) * log_term
+        temp     = ((UW * BW) / (2.0 * cp.pi * DZ)) * log_inj / (kuse_inj * krw_inj)
+        Pwf      = cp.abs(p_inj + temp)
+        BHP_out[kk] = cp.sum(Pwf.reshape(-1, N_inj, order="C"), axis=0) / nz
 
-def peaks(n):
-    """
-    Mimic basic of matlab peaks fn
-    """
-    xp = np.arange(n)
-    [x, y] = np.meshgrid(xp, xp)
-    z = np.zeros_like(x).astype(float)
-    for i in np.xrange(n / 5):
-        x0 = random() * n
-        y0 = random() * n
-        sdx = random() * n / 4.0
-        sdy = sdx
-        c = random() * 2 - 1.0
-        f = np.exp(
-            -(((x - x0) / sdx) ** 2)
-            - ((y - y0) / sdy) ** 2
-            - ((x - x0) / sdx) * ((y - y0) / sdy) * c
-        )
-        # f /= f.sum()
-        f *= random()
-        z += f
-    return z
+        # --- Drawdown (shared for oil and water producers) -------------
+        drawdown = p_prod - pwf_prod                          # (N_pr_cells,)
+
+        # --- Oil production rate (Darcy PI) ----------------------------
+        J_oil       = (2.0 * cp.pi * kuse_prod * kro_prod * DZ
+                       / ((UO * BO) * log_prod))
+        qoil_cells  = cp.abs(drawdown * J_oil)
+        qoil_out[kk] = cp.sum(qoil_cells.reshape(-1, N_pr, order="C"), axis=0) / nz
+
+        # --- Water production rate (Darcy PI) --------------------------
+        J_water      = (2.0 * cp.pi * kuse_prod * krw_prod * DZ
+                        / ((UW * BW) * log_prod))
+        qwater_cells = cp.abs(drawdown * J_water)
+        qwater_out[kk] = cp.sum(qwater_cells.reshape(-1, N_pr, order="C"), axis=0) / nz
+
+        # --- Gas production rate ---------------------------------------
+        # Use Darcy PI for free gas when KRG is significant,
+        # otherwise fall back to dissolved-gas formula qgas = RS * qoil.
+        # This matches standard black-oil practice:
+        #   - Below Pb: all gas dissolved, qgas = RS * qoil
+        #   - Above Pb (gas cap present): free gas + dissolved gas
+        has_free_gas = cp.any(krg_prod > 1e-6)
+        if has_free_gas:
+            J_gas        = (2.0 * cp.pi * kuse_prod * krg_prod * DZ
+                            / ((UG * BG) * log_prod))
+            qgas_cells   = cp.abs(drawdown * J_gas) + RS_prod * qoil_cells
+            qgas_out[kk] = cp.sum(qgas_cells.reshape(-1, N_pr, order="C"), axis=0) / nz
+        else:
+            # Solution-gas drive only
+            qgas_out[kk] = cp.mean(RS_prod) * qoil_out[kk]
+
+        # --- Water cut --------------------------------------------------
+        wct_out[kk] = (qwater_out[kk]
+                       / (qwater_out[kk] + qoil_out[kk] + 1e-10)) * 100.0
+
+        # --- Time stamp ------------------------------------------------
+        timz_out[kk, 0] = ((kk + 1) * dt) * MAXZ
+
+    # ------------------------------------------------------------------
+    # 6.  Single host transfer at the end
+    # ------------------------------------------------------------------
+    Big = cp.hstack([timz_out, BHP_out, qoil_out, qwater_out, qgas_out, wct_out])
+    return cp.asnumpy(Big)
+
 
 
 def Upstream_2PHASE(
     nx, ny, nz, S, UW, UO, BW, BO, SWI, SWR, Vol, qinn, V, Tt, porosity
 ):
     """
-    This function solves a 2-phase flow reservoir simulation problem using an upstream scheme.
-    Args:
-    - nx: int, number of grid cells in the x-direction.
-    - ny: int, number of grid cells in the y-direction.
-    - nz: int, number of grid cells in the z-direction.
-    - S: array, initial saturation field.
-    - UW: float, water viscosity.
-    - UO: float, oil viscosity.
-    - BW: float, water formation volume factor.
-    - BO: float, oil formation volume factor.
-    - SWI: float, initial water saturation.
-    - SWR: float, residual water saturation.
-    - Vol: array, grid cell volumes.
-    - qinn: array, inflow rate for each grid cell.
-    - V: dict, containing arrays with the x, y, and z coordinates of the grid cell faces.
-    - Tt: float, total time to simulate.
-    - porosity: array, porosity values for each grid cell.
-    Returns:
-    - S: array, final saturation field.
+    Solve a 2-phase flow reservoir simulation using an upstream (upwind) scheme.
+
+    Parameters
+    ----------
+    nx, ny, nz : int   — grid dimensions
+    S          : cupy.ndarray (N,1) — initial water saturation field
+    UW, UO     : float — water / oil viscosity
+    BW, BO     : float — water / oil formation volume factor
+    SWI        : float — initial water saturation
+    SWR        : float — residual water saturation
+    Vol        : cupy.ndarray (N,1) — grid cell volumes
+    qinn       : cupy.ndarray (N,1) — source / sink rates
+    V          : dict with keys "x","y","z" — face flux arrays
+    Tt         : float — total simulation time
+    porosity   : cupy.ndarray — porosity values
+
+    Returns
+    -------
+    S : cupy.ndarray (N,1) — final water saturation field
     """
 
-    Nx = nx
-    Ny = ny
-    Nz = nz
-    N = Nx * Ny * Nz
+    N = nx * ny * nz
+
+    # ------------------------------------------------------------------
+    # 1.  Static pre-computations  (done ONCE, outside the time loop)
+    # ------------------------------------------------------------------
+
+    # Pore volume  [shape (N,1)]
     poro = cp.reshape(porosity, (N, 1), "F")
-    pv = cp.multiply(Vol, poro)
+    pv   = Vol * poro                                    # elementwise, on GPU
+
+    # Source term  [shape (N,1)]
     qinn = cp.reshape(qinn, (-1, 1), "F")
-    fi = cp.maximum(qinn, 0)
-    XP = cp.maximum(V["x"], 0)
-    XN = cp.minimum(V["x"], 0)
-    YP = cp.maximum(V["y"], 0)
-    YN = cp.minimum(V["y"], 0)
-    ZP = cp.maximum(V["z"], 0)
-    ZN = cp.minimum(V["z"], 0)
+    fi_base = cp.maximum(qinn, 0)                        # inflow only
+
+    # Face-flux positive/negative splits  (computed once)
+    XP = cp.maximum(V["x"], 0);  XN = cp.minimum(V["x"], 0)
+    YP = cp.maximum(V["y"], 0);  YN = cp.minimum(V["y"], 0)
+    ZP = cp.maximum(V["z"], 0);  ZN = cp.minimum(V["z"], 0)
+
+    # Net influx per cell  [shape (nx,ny,nz)]
     Vi = (
-        XP[:Nx, :, :]
-        + YP[:, :Ny, :]
-        + ZP[:, :, :Nz]
-        - XN[1 : Nx + 1, :, :]
-        - YN[:, 1 : Ny + 1, :]
-        - ZN[:, :, 1 : Nz + 1]
+          XP[:nx,    :,    :]
+        + YP[:,    :ny,    :]
+        + ZP[:,      :,  :nz]
+        - XN[1:nx+1, :,    :]
+        - YN[:,  1:ny+1,   :]
+        - ZN[:,      :, 1:nz+1]
     )
     Vi = cp.reshape(Vi, (N, 1), "F")
-    pm = min(pv / (Vi + fi))
-    cfl = ((1 - SWR) / 3) * pm
-    # Nts =#30
+
+    # CFL time-step  -------------------------------------------------------
+    # cp.min stays on GPU; no host-side Python min() transfer
+    pm  = cp.min(pv / (Vi + fi_base))
+    cfl = ((1.0 - SWR) / 3.0) * float(pm)   # single scalar → float is fine
     Nts = math.ceil(Tt / cfl)
-    # print(Nts)
-    dtx = cp.divide(cp.divide(Tt, Nts), pv)
-    # dtx = cp.divide(30*1e-4,pv)
-    dtx = cp.ravel(dtx)
-    A = GenA(nx, ny, nz, V, qinn)
-    Afirst = A
-    A = spdiags(dtx, 0, N, N, format="csr") @ Afirst
-    # A=Afirst
-    fitemp = cp.maximum(qinn, 0)
-    fi = cp.multiply(fitemp, cp.reshape(dtx, (-1, 1), "F"))
-    for t in range(Nts):
-        # print(  '........' +str(t) + '/' +str (Nts))
-        mw, mo, dMw, dMo = RelPerm2(S, UW, UO, BW, BO, SWI, SWR, nx, ny, nz)
-        fw = cp.divide(mw, cp.add(mw, mo))
-        Asa = A @ fw
-        S = cp.add(S, cp.add(Asa, fi))
+
+    # Per-cell time-step scaling  [shape (N,)]
+    dtx = cp.ravel(Tt / (Nts * pv))          # fused division, no spdiags needed
+
+    # Scale transport matrix once: A_scaled = diag(dtx) @ A_unscaled
+    # using elementwise row-scaling instead of a sparse diagonal matrix product
+    A_unscaled = GenA(nx, ny, nz, V, qinn)   # sparse (N,N) CSR
+    # Row-scale: multiply each row i by dtx[i]  — no N×N sparse alloc
+    A = csr_matrix(A_unscaled.multiply(dtx.reshape(-1, 1)))
+
+    # Scale source term once
+    fi = fi_base * dtx.reshape(-1, 1)        # (N,1), stays on GPU
+
+    # ------------------------------------------------------------------
+    # 2.  Time loop  (only RelPerm + one SpMV + one vector add per step)
+    # ------------------------------------------------------------------
+    for _ in range(Nts):
+        mw, mo, _, _ = RelPerm2(S, UW, UO, BW, BO, SWI, SWR, nx, ny, nz)
+
+        # Fractional flow (fused ops, no temporaries)
+        fw = mw / (mw + mo)                  # (N,1)
+
+        # Saturation update: S += A @ fw + fi
+        S = S + A @ fw + fi
+
     return S
 
 
+
 def Upstream_3PHASE(
-    nx,
-    ny,
-    nz,
-    S,
-    Soil,
-    UW,
-    UO,
-    UG,
-    BW,
-    BO,
-    BG,
-    RS,
-    SWI,
-    SWR,
-    Vol,
-    qinn,
-    qinnoil,
-    V,
-    Tt,
-    porosity,
-    SWOW,
-    SWOG,
+    nx, ny, nz, S, Soil,
+    UW, UO, UG, BW, BO, BG, RS,
+    SWI, SWR, Vol, qinn, qinnoil, V, Tt, porosity, tables,
 ):
-    Nx = nx
-    Ny = ny
-    Nz = nz
-    N = Nx * Ny * Nz
+    """
+    Explicit upstream (upwind) three-phase flow solver.
+
+    Note on phase convention
+    ------------------------
+    Following the Eclipse SWOG convention used in the calling code:
+      S    = water saturation
+      Soil = gas saturation   (named 'oil' but tracked via gas fractional flow)
+      fw   = water fractional flow  = Mw / Mt
+      fwo  = gas fractional flow    = Mg / Mt
+    where Mt = Mw + Mo + Mg + RS*Mo  (total mobility incl. dissolved gas).
+
+    Parameters
+    ----------
+    S, Soil    : cupy.ndarray (N,1) — water and gas saturation
+    SWOW, SWOG : cupy.ndarray       — rel-perm tables
+    V          : dict {"x","y","z"} — face fluxes
+
+    Returns
+    -------
+    S, Soil : cupy.ndarray (N,1)
+    """
+    N = nx * ny * nz
+
+    # ------------------------------------------------------------------
+    # 1.  Static pre-computations (outside time loop)
+    # ------------------------------------------------------------------
     poro = cp.reshape(porosity, (N, 1), "F")
-    pv = cp.multiply(Vol, poro)
-    qinn = cp.reshape(qinn, (-1, 1), "F")
+    pv   = Vol * poro                               # (N,1)
+
+    qinn  = cp.reshape(qinn,    (-1, 1), "F")
     qinno = cp.reshape(qinnoil, (-1, 1), "F")
-    fi = cp.maximum(qinn, 0)
-    fio = cp.maximum(qinno, 0)
-    XP = cp.maximum(V["x"], 0)
-    XN = cp.minimum(V["x"], 0)
-    YP = cp.maximum(V["y"], 0)
-    YN = cp.minimum(V["y"], 0)
-    ZP = cp.maximum(V["z"], 0)
-    ZN = cp.minimum(V["z"], 0)
+
+    # Face-flux splits (computed once)
+    XP = cp.maximum(V["x"], 0);  XN = cp.minimum(V["x"], 0)
+    YP = cp.maximum(V["y"], 0);  YN = cp.minimum(V["y"], 0)
+    ZP = cp.maximum(V["z"], 0);  ZN = cp.minimum(V["z"], 0)
+
     Vi = (
-        XP[:Nx, :, :]
-        + YP[:, :Ny, :]
-        + ZP[:, :, :Nz]
-        - XN[1 : Nx + 1, :, :]
-        - YN[:, 1 : Ny + 1, :]
-        - ZN[:, :, 1 : Nz + 1]
+          XP[:nx,      :,      :]
+        + YP[:,      :ny,      :]
+        + ZP[:,        :,    :nz]
+        - XN[1:nx+1,   :,      :]
+        - YN[:,   1:ny+1,      :]
+        - ZN[:,        :, 1:nz+1]
     )
     Vi = cp.reshape(Vi, (N, 1), "F")
 
-    pm = min(pv / (Vi + fi))
-    pmo = min(pv / (Vi + fio))
+    # ------------------------------------------------------------------
+    # 2.  Unified CFL — use the MORE restrictive (larger Nts) of the two
+    #     phases. Both share the same velocity field so they must step
+    #     together. Using separate Nts for each phase violates stability
+    #     for the slower-stepping phase.
+    # ------------------------------------------------------------------
+    fi_inflow  = cp.maximum(qinn,  0)
+    fio_inflow = cp.maximum(qinno, 0)
 
-    cfl = ((1 - SWR) / 3) * pm
-    cflo = ((1 - SWR) / 3) * pmo
+    pm  = float(cp.min(pv / (Vi + fi_inflow)))    # cp.min — stays on GPU
+    pmo = float(cp.min(pv / (Vi + fio_inflow)))
 
-    # Nts =#30
-    Nts = math.ceil(Tt / cfl)
-    Ntso = math.ceil(Tt / cflo)
+    cfl  = ((1.0 - SWR) / 3.0) * pm
+    cflo = ((1.0 - SWR) / 3.0) * pmo
 
-    # print(Nts)
-    dtx = cp.divide(cp.divide(Tt, Nts), pv)
-    dtxo = cp.divide(cp.divide(Tt, Ntso), pv)
-    # dtx = cp.divide(30*1e-4,pv)
-    dtx = cp.ravel(dtx)
-    dtxo = cp.ravel(dtxo)
+    # Single Nts — most restrictive of both phases
+    Nts = max(math.ceil(Tt / cfl), math.ceil(Tt / cflo))
 
-    A = GenA(nx, ny, nz, V, qinn)
-    Ao = GenA(nx, ny, nz, V, qinno)
+    # Per-cell timestep scalings
+    dtx  = cp.ravel(Tt / (Nts * pv))              # (N,)  water
+    dtxo = cp.ravel(Tt / (Nts * pv))              # (N,)  gas  (same dt — unified CFL)
 
-    Afirst = A
-    Afirsto = Ao
+    # Row-scale transport matrices — no N×N sparse diagonal alloc
+    A_raw  = GenA(nx, ny, nz, V, qinn)
+    Ao_raw = GenA(nx, ny, nz, V, qinno)
 
-    A = spdiags(dtx, 0, N, N, format="csr") @ Afirst
-    Ao = spdiags(dtxo, 0, N, N, format="csr") @ Afirsto
-    # A=Afirst
-    fitemp = cp.maximum(qinn, 0)
-    fitempo = cp.maximum(qinno, 0)
+    A  = csr_matrix(A_raw.multiply( dtx.reshape(-1, 1)))
+    Ao = csr_matrix(Ao_raw.multiply(dtxo.reshape(-1, 1)))
 
-    fi = cp.multiply(fitemp, cp.reshape(dtx, (-1, 1), "F"))
-    fio = cp.multiply(fitempo, cp.reshape(dtxo, (-1, 1), "F"))
+    # Scaled source terms (constant across timesteps)
+    fi  = fi_inflow  * dtx.reshape(-1, 1)          # (N,1)
+    fio = fio_inflow * dtxo.reshape(-1, 1)          # (N,1)
 
-    for t in range(Nts):
-        # print(  '........' +str(t) + '/' +str (Nts))
-        # mw,mo,dMw,dMo=RelPerm2(S,UW,UO,BW,BO,SWI,SWR)
+    # ------------------------------------------------------------------
+    # 3.  Explicit time loop
+    #     Only RelPerm3 + two SpMVs + two vector adds per step
+    # ------------------------------------------------------------------
+    for _ in range(Nts):
         mw, mo, mg, _, _, _ = RelPerm3(
-            S, Soil, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz, SWOW, SWOG
+            S, Soil, UW, UO, UG, BW, BO, BG,
+            SWI, SWR, nx, ny, nz, tables
         )
-        fw = cp.divide(mw, cp.add(cp.add(cp.add(mw, mo), mg), mo * RS))
-        Asa = A @ fw
-        S = cp.add(S, cp.add(Asa, fi))
 
-        fwo = cp.divide(mg, cp.add(cp.add(cp.add(mw, mo), mg), mo * RS))
-        Asa = Ao @ fwo
-        Soil = cp.add(Soil, cp.add(Asa, fio))
+        # Total mobility — computed once, shared by both fractional flows
+        Mt = mw + mo + mg + RS * mo                # (N,1)
+
+        # Water fractional flow and saturation update
+        fw = mw / Mt
+        S  = S + A @ fw + fi
+
+        # Gas fractional flow and saturation update
+        # (fwo = gas f.f. under SWOG/Eclipse convention)
+        fwo  = mg / Mt
+        Soil = Soil + Ao @ fwo + fio
 
     return S, Soil
 
 
 def RelPerm2(Sa, UW, UO, BW, BO, SWI, SWR, nx, ny, nz):
     """
-    Computes the relative permeability and its derivative w.r.t saturation S,
-    based on Brooks and Corey model.
+    Two-phase Brooks-Corey relative permeability and mobility derivatives.
 
     Parameters
     ----------
-    Sa : array_like
-        Saturation value.
-    UW : float
-        Water viscosity.
-    UO : float
-        Oil viscosity.
-    BW : float
-        Water formation volume factor.
-    BO : float
-        Oil formation volume factor.
-    SWI : float
-        Initial water saturation.
-    SWR : float
-        Residual water saturation.
-    nx, ny, nz : int
-        The number of grid cells in x, y, and z directions.
+    Sa         : cupy.ndarray — water saturation, any shape
+    UW, UO     : float        — water / oil viscosity
+    BW, BO     : float        — water / oil formation volume factor
+    SWI        : float        — irreducible water saturation
+    SWR        : float        — residual water saturation
+    nx, ny, nz : int          — grid dimensions (unused; retained for API compatibility)
 
     Returns
     -------
-    Mw : array_like
-        Water relative permeability.
-    Mo : array_like
-        Oil relative permeability.
-    dMw : array_like
-        Water relative permeability derivative w.r.t saturation.
-    dMo : array_like
-        Oil relative permeability derivative w.r.t saturation.
+    Mw, Mo, dMw, dMo : cupy.ndarray, each shape (N, 1)
     """
-    S = (Sa - SWI) / (1 - SWI - SWR)
-    Mw = (S**2) / (UW * BW)  # Water mobility
-    Mo = ((1 - S) ** 2) / (UO * BO)  # Oil mobility
-    dMw = 2 * S / (UW * BW) / (1 - SWI - SWR)
-    dMo = -2 * (1 - S) / (UO * BO) / (1 - SWI - SWR)
 
-    return (
-        cp.reshape(Mw, (-1, 1), "F"),
-        cp.reshape(Mo, (-1, 1), "F"),
-        cp.reshape(dMw, (-1, 1), "F"),
-        cp.reshape(dMo, (-1, 1), "F"),
-    )
+    # Scalar denominator — computed once
+    denom = 1.0 - SWI - SWR                      # scalar
+
+    # Normalised water saturation — flat (N,) for all subsequent ops
+    S     = (Sa.ravel() - SWI) / denom           # (N,)
+    one_S = 1.0 - S                              # reused for Mo and dMo
+
+    # Mobilities
+    Mw = S**2        / (UW * BW)
+    Mo = one_S**2    / (UO * BO)
+
+    # Derivatives (analytically consistent with Mw, Mo above)
+    dMw =  2.0 * S     / (UW * BW * denom)
+    dMo = -2.0 * one_S / (UO * BO * denom)
+
+    # Single reshape at return — no intermediate (-1,1) allocations
+    def _col(x): return x.reshape(-1, 1)
+
+    return _col(Mw), _col(Mo), _col(dMw), _col(dMo)
 
 
-def RelPerm3(Sa, Sg, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz, SWOW, SWOG):
+
+def _build_relperm3_tables(SWOW, SWOG):
+    # Force conversion to CuPy FIRST before any slicing or astype
+    SWOW = cp.asarray(SWOW, dtype=cp.float32)
+    SWOG = cp.asarray(SWOG, dtype=cp.float32)
+
+    sw_tab = SWOW[:, 0]
+    sg_tab = SWOG[:, 0]
+
+    return {
+        "sw_tab"    : sw_tab,
+        "sg_tab"    : sg_tab,
+        "KROW_tab"  : SWOW[:, 1],
+        "KRW_tab"   : SWOW[:, 2],
+        "KROG_tab"  : SWOG[:, 1],
+        "KRG_tab"   : SWOG[:, 2],
+        "dKRW_tab"  : cp.gradient(SWOW[:, 2], sw_tab),
+        "dKROW_tab" : cp.gradient(SWOW[:, 1], sw_tab),
+        "dKRG_tab"  : cp.gradient(SWOG[:, 2], sg_tab),
+        "dKROG_tab" : cp.gradient(SWOG[:, 1], sg_tab),
+    }
+
+
+def _interp_fast(x_flat, xp, fp):
     """
-    Computes the relative permeability and its derivative w.r.t saturation S,
-    based on Brooks and Corey model.
+    Single-pass linear interpolation on a flat float32 CuPy array.
+    No dtype casting, no NaN handling, no boundary cp.where overhead —
+    those are unnecessary for rel-perm tables which are always in [0,1].
 
     Parameters
     ----------
-    Sa : array_like
-        Saturation value.
-    UW : float
-        Water viscosity.
-    UO : float
-        Oil viscosity.
-    UG : float
-        Gas viscosity.
-    BW : float
-        Water formation volume factor.
-    BO : float
-        Oil formation volume factor.
-    BG : float
-        Gas formation volume factor.
-    SWI : float
-        Initial water saturation.
-    SWR : float
-        Residual water saturation.
-    SGI : float
-        Initial gas saturation.
-    SGR : float
-        Residual gas saturation.
-    nx, ny, nz : int
-        The number of grid cells in x, y, and z directions.
+    x_flat : cupy.ndarray (N,)  float32 — query points, already flat
+    xp     : cupy.ndarray (M,)  float32 — table x-nodes (monotone increasing)
+    fp     : cupy.ndarray (M,)  float32 — table y-values
 
     Returns
     -------
-    Mw : array_like
-        Water relative permeability.
-    Mo : array_like
-        Oil relative permeability.
-    Mg : array_like
-        Gas relative permeability.
-    dMw : array_like
-        Water relative permeability derivative w.r.t saturation.
-    dMo : array_like
-        Oil relative permeability derivative w.r.t saturation.
-    dMg : array_like
-        Gas relative permeability derivative w.r.t saturation.
+    y : cupy.ndarray (N,)  float32
+    """
+    idx = cp.searchsorted(xp, x_flat, side="right")
+    idx = cp.clip(idx, 1, len(xp) - 1)
+
+    x0 = xp[idx - 1];  x1 = xp[idx]
+    f0 = fp[idx - 1];  f1 = fp[idx]
+
+    t = (x_flat - x0) / (x1 - x0 + 1e-30)
+    t = cp.clip(t, 0.0, 1.0)
+    return f0 + t * (f1 - f0)
+
+
+def _interp_batch(x_flat, xp, fp_list):
+    """
+    Run searchsorted ONCE and interpolate multiple fp arrays in one pass.
+    This is the key optimisation — 8 separate interp calls become 1
+    searchsorted + 8 cheap linear ops.
+
+    Parameters
+    ----------
+    x_flat  : cupy.ndarray (N,)     float32 — query points
+    xp      : cupy.ndarray (M,)     float32 — shared x-nodes
+    fp_list : list of cupy.ndarray  float32 — y-value tables to interpolate
+
+    Returns
+    -------
+    results : list of cupy.ndarray (N,)  float32
+    """
+    idx = cp.searchsorted(xp, x_flat, side="right")
+    idx = cp.clip(idx, 1, len(xp) - 1)
+
+    x0  = xp[idx - 1]
+    x1  = xp[idx]
+    t   = cp.clip((x_flat - x0) / (x1 - x0 + 1e-30), 0.0, 1.0)
+
+    results = []
+    for fp in fp_list:
+        f0 = fp[idx - 1]
+        f1 = fp[idx]
+        results.append(f0 + t * (f1 - f0))
+    return results
+
+
+def RelPerm3(Sa, Sg, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz, tables):
+    """
+    Three-phase relative permeability and mobility derivatives.
+
+    Uses precomputed table gradients (from _build_relperm3_tables) so that
+    cp.gradient is never called inside the Newton loop.
+    All 8 interpolations share a single cp.searchsorted call per phase.
+
+    Parameters
+    ----------
+    Sa, Sg  : cupy.ndarray (N,1) or (N,) — water and gas saturations
+    UW,UO,UG: float — phase viscosities [cP]
+    BW,BO,BG: float — formation volume factors [RB/STB or RB/SCF]
+    SWI     : float — irreducible water saturation
+    SWR     : float — residual water saturation
+    nx,ny,nz: int   — grid dimensions (unused internally, kept for API compat)
+    tables  : dict  — precomputed from _build_relperm3_tables(SWOW, SWOG)
+                      Pass this once per timestep, reuse across Newton iters.
+
+    Returns
+    -------
+    Mw, Mo, Mg, dMw, dMo, dMg : cupy.ndarray each (N,1)
     """
 
-    Sa = cp.reshape(Sa, (-1, 1), "F")
-    Sg = cp.reshape(Sg, (-1, 1), "F")
-    soil = 1 - (Sa + Sg)
-    soil = cp.clip(soil, 0, 1)
-    # soil=cp.ravel(soil)
+    # ── 1. Flatten to float32 once ────────────────────────────────────────────
+    sw   = cp.ravel(Sa, order="F").astype(cp.float32)   # (N,)
+    sg   = cp.ravel(Sg, order="F").astype(cp.float32)   # (N,)
+    soil = cp.clip(1.0 - (sw + sg), 0.0, 1.0)           # (N,)
 
-    so = (soil - SWR) / (1 - SWI - SWR)
-    sw = (Sa - SWI) / (1 - SWI - SWR)
-    sg = (Sg) / (1 - SWI - SWR)
+    # ── 2. Unpack precomputed tables ──────────────────────────────────────────
+    sw_tab   = tables["sw_tab"]
+    sg_tab   = tables["sg_tab"]
 
-    SOD = so
-    SWD = sw
-    SGD = sg
-
-    KROW = interp(Sa.reshape(-1, 1), SWOW[:, 0], SWOW[:, 1])
-    KRW = interp(Sa.reshape(-1, 1), SWOW[:, 0], SWOW[:, 2])
-
-    KROG = interp(Sg.reshape(-1, 1), SWOG[:, 0], SWOG[:, 1])
-    KRG = interp(Sg.reshape(-1, 1), SWOG[:, 0], SWOG[:, 2])
-
-    KRW = KRW.reshape(-1, 1)
-    KRG = KRG.reshape(-1, 1)
-    KROW = KROW.reshape(-1, 1)
-    KROG = KROG.reshape(-1, 1)
-
-    sod = SOD.reshape(-1, 1)
-    a = KROW / (1 - SWD)
-    b = KROG / (1 - SGD)
-    KRO = a * b * sod
-
-    Mw = KRW / (UW * BW)
-    # print(Mw.shape)
-    Mo = KRO / (UO * BO)
-    # print(Mo.shape)
-    Mg = KRG / (UG * BG)
-    # print(Mg.shape)
-
-    dMw = 2 * sw / (UW * BW) / (1 - SWI - SWR)
-    dMo = -2 * (1 - sw - Sg) / (UO * BO) / (1 - SWI - SWR)
-    dMg = 2 * Sg / (UG * BG) / (1 - SWI - SWR)
-
-    return (
-        cp.reshape(Mw, (-1, 1), "F"),
-        cp.reshape(Mo, (-1, 1), "F"),
-        cp.reshape(Mg, (-1, 1), "F"),
-        cp.reshape(dMw, (-1, 1), "F"),
-        cp.reshape(dMo, (-1, 1), "F"),
-        cp.reshape(dMg, (-1, 1), "F"),
+    # ── 3. Batched interpolation — ONE searchsorted per phase ─────────────────
+    # Water-saturation tables: KROW, KRW, dKROW, dKRW — 4 arrays, 1 searchsorted
+    KROW, KRW, dKROW_sw, dKRW_sw = _interp_batch(
+        sw, sw_tab,
+        [tables["KROW_tab"], tables["KRW_tab"],
+         tables["dKROW_tab"], tables["dKRW_tab"]]
     )
+
+    # Gas-saturation tables: KROG, KRG, dKROG, dKRG — 4 arrays, 1 searchsorted
+    KROG, KRG, dKROG_sg, dKRG_sg = _interp_batch(
+        sg, sg_tab,
+        [tables["KROG_tab"], tables["KRG_tab"],
+         tables["dKROG_tab"], tables["dKRG_tab"]]
+    )
+
+    # ── 4. Three-phase KRO — Baker's linear model ─────────────────────────────
+    denom_s = float(1.0 - SWI - SWR)                    # scalar
+    So_norm = cp.clip(soil / denom_s, 0.0, 1.0)         # (N,)
+    KRO     = So_norm * KROW * KROG                      # (N,)
+
+    # ── 5. Mobilities ─────────────────────────────────────────────────────────
+    inv_UwBw = float(1.0 / (UW * BW))
+    inv_UoBo = float(1.0 / (UO * BO))
+    inv_UgBg = float(1.0 / (UG * BG))
+
+    Mw = KRW  * inv_UwBw                                 # (N,)
+    Mo = KRO  * inv_UoBo
+    Mg = KRG  * inv_UgBg
+
+    # ── 6. Derivatives — chain rule on Baker's KRO ────────────────────────────
+    # dKRO/dSw = dSo_norm/dSw * KROW*KROG  +  So_norm * dKROW/dSw * KROG
+    #          = -KROW*KROG/denom_s  +  So_norm * dKROW_sw * KROG
+    # dKRO/dSg = -KROW*KROG/denom_s  +  So_norm * KROW * dKROG_sg
+    KROW_KROG_d = KROW * KROG / denom_s                  # (N,) shared term
+
+    dKRO_sw = -KROW_KROG_d + So_norm * dKROW_sw * KROG
+    dKRO_sg = -KROW_KROG_d + So_norm * KROW     * dKROG_sg
+
+    dMw = dKRW_sw  * inv_UwBw
+    dMo = (dKRO_sw + dKRO_sg) * inv_UoBo
+    dMg = dKRG_sg  * inv_UgBg
+
+    # ── 7. Return (N,1) columns ───────────────────────────────────────────────
+    c = lambda x: x.reshape(-1, 1)
+    return c(Mw), c(Mo), c(Mg), c(dMw), c(dMo), c(dMg)
 
 
 def NewtRaph(
-    nx, ny, nz, porosity, Vol, S, V, qinn, Tt, UW, UO, SWI, SWR, method2, BW, BO
+    nx, ny, nz, porosity, Vol, S, V, qinn, Tt,
+    UW, UO, SWI, SWR, method2, BW, BO,
+    max_newton=20,
+    newton_tol=0.005,   # per-cell mean residual — grid-size independent
+    max_it=20,
 ):
     """
-    Uses Newton-Raphson method to solve the two-phase flow problem in a reservoir.
+    Newton-Raphson implicit solver for two-phase (water-oil) flow.
 
-    Args:
-    nx (int): Number of grid blocks in x-direction.
-    ny (int): Number of grid blocks in y-direction.
-    nz (int): Number of grid blocks in z-direction.
-    porosity (ndarray): Array of shape (nx,ny,nz) containing porosity values.
-    Vol (ndarray): Array of shape (nx,ny,nz) containing grid block volumes.
-    S (ndarray): Array of shape (nx,ny,nz) containing initial water saturation values.
-    V (dict): Dictionary containing arrays of x,y, and z directions of grid block boundaries.
-    qinn (ndarray): Array of shape (nx,ny,nz) containing injection rate values.
-    Tt (float): Total time for simulation.
-    UW (float): Water viscosity.
-    UO (float): Oil viscosity.
-    SWI (float): Initial water saturation.
-    SWR (float): Residual water saturation.
-    method2 (int): Specifies the linear solver to be used.
-                    1: GMRES
-                    2: Sparse LU factorization
-                    3: Conjugate gradient
-                    4: LSQR
-                    5: Adaptive algebraic multigrid
-                    6: Conjugate projected gradient method
-                    7: AMGX
-    typee (str): Specifies the AMGX solver to be used. For details see `AMGX_Inverse_problem` function.
-    BW (float): Water formation volume factor.
-    BO (float): Oil formation volume factor.
-
-    Returns:
-    S (ndarray): Array of shape (nx,ny,nz) containing water saturation values after simulation.
+    Fixes vs original:
+    ------------------
+    1. Normalised residual ||G||/N used for convergence — not step norm ||ds||
+       which scales with dt and N and never converges properly.
+    2. Production sinks included in residual via fw-weighted fi_prod term.
+       Original cp.maximum(qinn, 0) clipped all producers to zero.
+    3. Preconditioner built from actual Jacobian -dG, not from -B.
+    4. Saturation clipped to [SWI, 1] after every Newton update.
+    5. max_newton=20, max_it=10 (was 10 and implicit 8).
     """
+    N = nx * ny * nz
 
-    Nx = nx
-    Ny = ny
-    Nz = nz
-    N = Nx * Ny * Nz
-    A = GenA(nx, ny, nz, V, qinn)
-    conv = 0
-    IT = 0
-    S00 = S
-    while conv == 0:
-        dt = Tt / (2**IT)
-        poro = cp.reshape(porosity, (N, 1), "F")
-        pv = cp.multiply(Vol, poro)
-        dtx = cp.divide(dt, pv)  # dt/(pv)
-        dtx = cp.nan_to_num(dtx, copy=True, nan=0.0)
-        fi = cp.multiply(cp.maximum(qinn.reshape(-1, 1), 0), dtx.reshape(-1, 1))
-        dtx = cp.ravel(dtx)
-        B = spdiags(dtx, 0, N, N, format="csr") @ A
-        S0 = S
-        I = 0
-        while I < 2**IT:
-            S0 = S
-            dsn = 1
-            it = 0
-            I = I + 1
-            while (dsn > 0.001) and (it < 10):
-                Mw, Mo, dMw, dMo = RelPerm2(S, UW, UO, BW, BO, SWI, SWR, nx, ny, nz)
-                df = cp.divide(dMw, (Mw + Mo)) - cp.multiply(
-                    cp.divide(Mw, ((Mw + Mo) ** (2))), (dMw + dMo)
-                )  # dMw/(Mw + Mo)-Mw/(Mw+Mo)**(2)*(dMw+dMo)
-                df = cp.ravel(df)
-                dG = sparse.eye(N, dtype=cp.float32) - B @ spdiags(
-                    df, 0, N, N, format="csr"
+    # ── 1. Static quantities ──────────────────────────────────────────────────
+    poro = cp.reshape(porosity, (N, 1), "F")
+    pv   = Vol * poro                                  # (N,1) pore volume
+
+    qinn_col = cp.asarray(qinn, dtype=cp.float32).reshape(-1, 1)
+    fi_inj   = cp.maximum(qinn_col, 0.0)               # (N,1) injection source
+    fi_prod  = cp.minimum(qinn_col, 0.0)               # (N,1) production sink
+
+    A     = GenA(nx, ny, nz, V, qinn)                 # sparse (N,N) — static
+    I_mat = sparse.eye(N, dtype=cp.float32, format="csr")
+
+    S00  = S.copy()
+    conv = False
+    IT   = 0
+
+    res_w = float("inf")
+
+    # ── 2. Outer adaptive timestep loop ──────────────────────────────────────
+    while not conv:
+
+        if IT > max_it:
+            print(f"[NewtRaph] WARNING: IT={IT} > max_it={max_it}, "
+                  f"returning unconverged solution")
+            return S
+
+        dt       = Tt / (2 ** IT)
+        dtx      = cp.nan_to_num(dt / pv, nan=0.0)    # (N,1)
+        dtx_flat = cp.ravel(dtx)
+
+        # dt-scaled source terms
+        fi_w  = fi_inj  * dtx                          # injection  (>=0)
+        fi_pw = fi_prod * dtx                          # production (<=0)
+
+        # Row-scale transport matrix by dtx
+        B = csr_matrix(A.multiply(dtx_flat.reshape(-1, 1)))   # (N,N) sparse
+
+        S   = S00.copy()
+
+        # ── 3. Sub-step loop ──────────────────────────────────────────────────
+        failed = False
+        for sub in range(2 ** IT):
+            S0    = S.copy()
+            res_w = float("inf")
+            it    = 0
+            M_pre = None
+
+            # ── 4. Newton iteration ───────────────────────────────────────────
+            while res_w > newton_tol and it < max_newton:
+
+                Mw, Mo, dMw, dMo = RelPerm2(
+                    S, UW, UO, BW, BO, SWI, SWR, nx, ny, nz
                 )
-                dG.data = cp.nan_to_num(dG.data, copy=True, nan=0.0)
 
-                fw = Mw / (Mw + Mo)
-                G = S - S0 - (cp.add(B @ fw, fi))
-                G = cp.nan_to_num(G, copy=True, nan=0.0)
-                # G = sm.eliminate_zeros()
+                MwMo = Mw + Mo                         # total mobility (N,1)
 
-                if method2 == 1:  # GMRES
-                    M2 = spilu(-dG)
+                # Fractional-flow derivative df/dSw
+                df_flat = cp.ravel(
+                    dMw / MwMo - Mw / MwMo**2 * (dMw + dMo)
+                )
 
-                    def M_x(x):
-                        return M2.solve(x)
+                # Jacobian: dG = I - B * diag(df)
+                dG     = I_mat - csr_matrix(B.multiply(df_flat))
+                neg_dG = -dG
 
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = gmres(
-                        -dG, G, tol=1e-6, atol=0, restart=20, maxiter=100, M=M
-                    )
+                # Preconditioner from Jacobian — built once per sub-step
+                if it == 0 and method2 in (1, 3, 5):
+                    try:
+                        ilu   = spilu(neg_dG)
+                        M_pre = LinearOperator(
+                            (N, N), matvec=lambda x, f=ilu: f.solve(x)
+                        )
+                    except Exception:
+                        M_pre = None
 
+                # Fractional flow and residual
+                fw     = Mw / MwMo                     # (N,1) water fraction
+                G_flat = cp.ravel(
+                    S - S0 - (B @ fw + fi_w + fi_pw * fw)
+                )
+
+                # ── Linear solve ──────────────────────────────────────────────
+                if method2 == 1:
+                    ds, _ = gmres(neg_dG, G_flat, rtol=1e-6, atol=0,
+                                  restart=20, maxiter=100, M=M_pre)
                 elif method2 == 2:
-                    ds = spsolve(-dG, G)
+                    ds = spsolve(neg_dG, G_flat)
                 elif method2 == 3:
-                    M2 = spilu(-dG)
+                    ds, _ = cg(neg_dG, G_flat, rtol=1e-6, atol=0,
+                               maxiter=100, M=M_pre)
+                elif method2 == 4:
+                    ds = lsqr(neg_dG, G_flat)[0]
+                elif method2 == 5:
+                    ds, _ = bicgstab(neg_dG, G_flat, M=M_pre, tol=1e-6)
+                else:
+                    ds, _ = gmres(neg_dG, G_flat, rtol=1e-6, atol=0,
+                                  restart=20, maxiter=100, M=M_pre)
 
-                    def M_x(x):
-                        return M2.solve(x)
+                # Line search — dampen if update violates [SWI, 1]
+                alpha = 1.0
+                for _ in range(6):
+                    S_try = S + alpha * ds.reshape(-1, 1)
+                    if (float(cp.min(S_try)) >= float(SWI) and
+                            float(cp.max(S_try)) <= 1.0):
+                        break
+                    alpha *= 0.5
 
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = cg(-dG, G, tol=1e-6, atol=0, maxiter=100, M=M)
-                elif method2 == 4:  # LSQR
-                    G = cp.ravel(G)
-                    ds, istop, itn, normr = lsqr(-dG, G)[:4]
-                else:  # CPR
-                    M2 = spilu(-dG)
+                S  += alpha * ds.reshape(-1, 1)
+                S   = cp.clip(S, float(SWI), 1.0)      # enforce physical bounds
 
-                    def M_x(x):
-                        return M2.solve(x)
+                # Normalised residual — grid-size and dt independent
+                res_w = float(cp.linalg.norm(G_flat, 2)) / N
+                it   += 1
 
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = gmres(
-                        -dG, G, tol=1e-6, atol=0, restart=20, maxiter=100, M=M
-                    )
+            # ── Accept sub-step or mark failed ───────────────────────────────
+            if res_w > newton_tol:
+                S      = S00.copy()
+                failed = True
+                print(f"  [NewtRaph] sub={sub}/{2**IT} IT={IT} "
+                      f"res_w={res_w:.3e} iters={it} → chopping dt")
+                break
 
-                # print(exitCode)
-                ds = cp.reshape(ds, (-1, 1), "F")
-                S = cp.add(S, ds)  # S+ds
-                dsn = cp.linalg.norm(ds, 2)
-                it = it + 1
-
-            if dsn > 0.001:
-                I = 2 ** (IT)
-                S = S00
-
-        if dsn < 0.001:
-            conv = 1
+        # ── 5. Accept timestep or refine ─────────────────────────────────────
+        if not failed and res_w <= newton_tol:
+            conv = True
         else:
-            IT = IT + 1
+            IT += 1
+
     return S
+
 
 
 def NewtRaph2(
-    nx,
-    ny,
-    nz,
-    porosity,
-    Vol,
-    S,
-    Soil,
-    V,
-    qinn,
-    qinnoil,
-    Tt,
-    UW,
-    UO,
-    UG,
-    SWI,
-    SWR,
-    method2,
-    BW,
-    BO,
-    BG,
-    RS,
-    SWOW,
-    SWOG,
+    nx, ny, nz, porosity, Vol, S, Soil, V, qinn, qinnoil,
+    Tt, UW, UO, UG, SWI, SWR, method2, BW, BO, BG, RS, SWOW, SWOG,
+    tables=None,
+    max_newton=20,
+    newton_tol=0.005,
+    max_it=20,          # was 8 — residuals reach tol at IT=8/9, need headroom
 ):
-    Nx = nx
-    Ny = ny
-    Nz = nz
-    N = Nx * Ny * Nz
-    A = GenA(nx, ny, nz, V, qinn)
+    N = nx * ny * nz
+
+    if tables is None:
+        tables = _build_relperm3_tables(SWOW, SWOG)
+
+    # ── 1. Static quantities ──────────────────────────────────────────────────
+    poro = cp.reshape(porosity, (N, 1), "F")
+    pv   = Vol * poro
+
+    A    = GenA(nx, ny, nz, V, qinn)
     Aoil = GenA(nx, ny, nz, V, qinnoil)
-    conv = 0
-    IT = 0
-    S00 = S
-    S00oil = Soil
-    while conv == 0:
-        dt = Tt / (2**IT)
-        poro = cp.reshape(porosity, (N, 1), "F")
-        pv = cp.multiply(Vol, poro)
-        dtx = cp.divide(dt, pv)  # dt/(pv)
-        dtx = cp.nan_to_num(dtx, copy=True, nan=0.0)
-        fi = cp.multiply(cp.maximum(qinn.reshape(-1, 1), 0), dtx.reshape(-1, 1))
-        fioil = cp.multiply(cp.maximum(qinnoil.reshape(-1, 1), 0), dtx.reshape(-1, 1))
-        dtx = cp.ravel(dtx)
-        B = spdiags(dtx, 0, N, N, format="csr") @ A
-        Boil = spdiags(dtx, 0, N, N, format="csr") @ Aoil
-        S0 = S
-        S0oil = Soil
-        I = 0
-        while I < 2**IT:
-            S0 = S
-            S0oil = Soil
-            dsn = 1
-            it = 0
-            I = I + 1
-            while (dsn > 0.01) and (it < 5):
-                Mw, Mo, Mg, dMw, dMo, dMg = RelPerm3(
-                    S, Soil, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz, SWOW, SWOG
-                )
-                df = cp.divide(dMw, (Mw + Mo + Mg + RS * Mo)) - cp.multiply(
-                    cp.divide(Mw, ((Mw + Mo + Mg + RS * Mo) ** (2))), (dMw + dMo + dMg)
-                )  # dMw/(Mw + Mo)-Mw/(Mw+Mo)**(2)*(dMw+dMo)
-                dfoil = cp.divide(dMg, (Mw + Mo + Mg + RS * Mo)) - cp.multiply(
-                    cp.divide(Mg, ((Mw + Mo + Mg + RS * Mo) ** (2))), (dMw + dMo + dMg)
-                )
-                df = cp.ravel(df)
-                dfoil = cp.ravel(dfoil)
-                dG = sparse.eye(N, dtype=cp.float32) - B @ spdiags(
-                    df, 0, N, N, format="csr"
-                )
-                dGoil = sparse.eye(N, dtype=cp.float32) - Boil @ spdiags(
-                    dfoil, 0, N, N, format="csr"
-                )
-                dG.data = cp.nan_to_num(dG.data, copy=True, nan=0.0)
-                dGoil.data = cp.nan_to_num(dGoil.data, copy=True, nan=0.0)
 
-                fw = Mw / (Mw + Mo + Mg + RS * Mo)
-                fwoil = Mg / (Mw + Mo + Mg + RS * Mo)
+    qinn_col    = cp.asarray(qinn,    dtype=cp.float32).reshape(-1, 1)
+    qinnoil_col = cp.asarray(qinnoil, dtype=cp.float32).reshape(-1, 1)
 
-                G = S - S0 - (cp.add(B @ fw, fi))
-                Goil = Soil - S0oil - (cp.add(Boil @ fwoil, fioil))
+    fi_inj_w  = cp.maximum(qinn_col,    0.0)
+    fi_prod_w = cp.minimum(qinn_col,    0.0)
+    fi_inj_o  = cp.maximum(qinnoil_col, 0.0)
+    fi_prod_o = cp.minimum(qinnoil_col, 0.0)
 
-                G = cp.nan_to_num(G, copy=True, nan=0.0)
-                Goil = cp.nan_to_num(Goil, copy=True, nan=0.0)
-                # G = sm.eliminate_zeros()
+    I_mat = sparse.eye(N, dtype=cp.float32, format="csr")
 
-                if method2 == 1:  # GMRES
-                    M2 = spilu(-dG)
+    S00    = S.copy()
+    S00oil = Soil.copy()
+    conv   = False
+    IT     = 0
 
-                    def M_x(x):
-                        return M2.solve(x)
+    res_w = res_o = float("inf")
+    dsn = dsnoil = 1.0
 
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = gmres(
-                        -dG, G, tol=1e-6, atol=0, restart=20, maxiter=100, M=M
+    def _make_precond(neg_mat):
+        try:
+            ilu = spilu(neg_mat)
+            return LinearOperator((N, N), matvec=lambda x, f=ilu: f.solve(x))
+        except Exception:
+            return None
+
+    # ── 2. Outer adaptive timestep loop ──────────────────────────────────────
+    while not conv:
+
+        if IT > max_it:
+            print(f"[NewtRaph2] WARNING: IT={IT} > max_it={max_it}, "
+                  f"returning unconverged solution")
+            return S, Soil
+
+        dt = Tt / (2 ** IT)
+
+        dtx      = cp.nan_to_num(dt / pv, nan=0.0)
+        dtx_flat = cp.ravel(dtx)
+
+        fi_w  = fi_inj_w  * dtx
+        fi_pw = fi_prod_w * dtx
+        fi_o  = fi_inj_o  * dtx
+        fi_po = fi_prod_o * dtx
+
+        B    = csr_matrix(A.multiply(dtx_flat.reshape(-1, 1)))
+        Boil = csr_matrix(Aoil.multiply(dtx_flat.reshape(-1, 1)))
+
+        S    = S00.copy()
+        Soil = S00oil.copy()
+
+        # ── 3. Sub-step loop ──────────────────────────────────────────────────
+        failed = False
+        for sub in range(2 ** IT):
+            S0    = S.copy()
+            S0oil = Soil.copy()
+            res_w = res_o = float("inf")
+            dsn = dsnoil = 1.0
+            it  = 0
+            M_pre = M_pre_oil = None
+
+            # ── 4. Newton iteration ───────────────────────────────────────────
+            while (res_w > newton_tol or res_o > newton_tol) and it < max_newton:
+
+                if it == 0 or dsn > 1e-4 or dsnoil > 1e-4:
+                    Mw, Mo, Mg, dMw, dMo, dMg = RelPerm3(
+                        S, Soil, UW, UO, UG, BW, BO, BG,
+                        SWI, SWR, nx, ny, nz, tables
                     )
 
-                    M2oil = spilu(-dGoil)
+                denom  = Mw + Mo + Mg
+                denom2 = denom ** 2
+                dMsum  = dMw + dMo + dMg
 
-                    def M_xoil(x):
-                        return M2oil.solve(x)
+                df_flat    = cp.ravel(dMw / denom - Mw / denom2 * dMsum)
+                dfoil_flat = cp.ravel(dMg / denom - Mg / denom2 * dMsum)
 
-                    Moil = LinearOperator((nx * ny * nz, nx * ny * nz), M_xoil)
-                    dsoil, exitCodeoil = gmres(
-                        -dGoil, Goil, tol=1e-6, atol=0, restart=20, maxiter=100, M=Moil
-                    )
+                dG    = I_mat - csr_matrix(B.multiply(df_flat))
+                dGoil = I_mat - csr_matrix(Boil.multiply(dfoil_flat))
 
+                neg_dG    = -dG
+                neg_dGoil = -dGoil
+
+                if it == 0 and method2 in (1, 3, 5):
+                    M_pre     = _make_precond(neg_dG)
+                    M_pre_oil = _make_precond(neg_dGoil)
+
+                fw    = Mw / denom
+                fwoil = Mg / denom
+
+                G    = cp.ravel(
+                    S    - S0    - (B    @ fw    + fi_w  + fi_pw * fw   )
+                )
+                Goil = cp.ravel(
+                    Soil - S0oil - (Boil @ fwoil + fi_o  + fi_po * fwoil)
+                )
+
+                # ── Linear solves ─────────────────────────────────────────────
+                if method2 == 1:
+                    ds,    _ = gmres(neg_dG,    G,    rtol=1e-6, atol=0,
+                                     restart=20, maxiter=100, M=M_pre)
+                    dsoil, _ = gmres(neg_dGoil, Goil, rtol=1e-6, atol=0,
+                                     restart=20, maxiter=100, M=M_pre_oil)
                 elif method2 == 2:
-                    ds = spsolve(-dG, G)
-                    dsoil = spsolve(-dGoil, Goil)
+                    ds    = spsolve(neg_dG,    G)
+                    dsoil = spsolve(neg_dGoil, Goil)
                 elif method2 == 3:
-                    M2 = spilu(-dG)
+                    ds,    _ = cg(neg_dG,    G,    rtol=1e-6, atol=0,
+                                  maxiter=100, M=M_pre)
+                    dsoil, _ = cg(neg_dGoil, Goil, rtol=1e-6, atol=0,
+                                  maxiter=100, M=M_pre_oil)
+                elif method2 == 4:
+                    ds    = lsqr(neg_dG,    G)[0]
+                    dsoil = lsqr(neg_dGoil, Goil)[0]
+                elif method2 == 5:
+                    ds,    _ = bicgstab(neg_dG,    G,    M=M_pre,     tol=1e-6)
+                    dsoil, _ = bicgstab(neg_dGoil, Goil, M=M_pre_oil, tol=1e-6)
+                else:
+                    ds,    _ = gmres(neg_dG,    G,    rtol=1e-6, atol=0,
+                                     restart=20, maxiter=100, M=M_pre)
+                    dsoil, _ = gmres(neg_dGoil, Goil, rtol=1e-6, atol=0,
+                                     restart=20, maxiter=100, M=M_pre_oil)
 
-                    def M_x(x):
-                        return M2.solve(x)
+                # ── Line search: enforce Sw >= SWI, Sg >= 0, Sw+Sg <= 1 ──────
+                alpha = 1.0
+                for _ in range(6):
+                    S_try    = S    + alpha * ds.reshape(-1, 1)
+                    Soil_try = Soil + alpha * dsoil.reshape(-1, 1)
+                    sw_ok  = float(cp.min(S_try))             >= float(SWI)
+                    sg_ok  = float(cp.min(Soil_try))          >= 0.0
+                    sum_ok = float(cp.max(S_try + Soil_try))  <= 1.0
+                    if sw_ok and sg_ok and sum_ok:
+                        break
+                    alpha *= 0.5
 
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = cg(-dG, G, tol=1e-6, atol=0, maxiter=100, M=M)
+                S    += alpha * ds.reshape(-1, 1)
+                Soil += alpha * dsoil.reshape(-1, 1)
 
-                    M2oil = spilu(-dGoil)
+                # ── CRITICAL FIX: clip jointly — gas gets remaining pore space
+                S    = cp.clip(S,    float(SWI), 1.0)
+                Soil = cp.clip(Soil, 0.0, 1.0 - S)   # Sw + Sg <= 1 always
 
-                    def M_xoil(x):
-                        return M2oil.solve(x)
+                res_w   = float(cp.linalg.norm(G,    2))/N
+                res_o   = float(cp.linalg.norm(Goil, 2))/N
+                dsn    = float(cp.linalg.norm(ds,    2)) * alpha
+                dsnoil = float(cp.linalg.norm(dsoil, 2)) * alpha
+                it    += 1
 
-                    Moil = LinearOperator((nx * ny * nz, nx * ny * nz), M_xoil)
-                    dsoil, exitCodeoil = cg(
-                        -dGoil, Goil, tol=1e-6, atol=0, maxiter=100, M=Moil
-                    )
+            # ── Accept sub-step or mark failed ───────────────────────────────
+            if res_w > newton_tol or res_o > newton_tol:
+                S    = S00.copy()
+                Soil = S00oil.copy()
+                failed = True
+                print(f"  [Newton] sub={sub}/{2**IT} IT={IT} "
+                      f"res_w={res_w:.3e} res_o={res_o:.3e} "
+                      f"dsn={dsn:.3e} dsnoil={dsnoil:.3e} iters={it} → chopping dt")
+                break
 
-                elif method2 == 4:  # LSQR
-                    G = cp.ravel(G)
-                    ds, istop, itn, normr = lsqr(-dG, G)[:4]
-
-                    Goil = cp.ravel(Goil)
-                    dsoil, istopo, itno, normro = lsqr(-dGoil, Goil)[:4]
-                else:  # CPR
-                    M2 = spilu(-dG)
-
-                    def M_x(x):
-                        return M2.solve(x)
-
-                    M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-                    ds, exitCode = gmres(
-                        -dG, G, tol=1e-6, atol=0, restart=20, maxiter=100, M=M
-                    )
-
-                    M2oil = spilu(-dGoil)
-
-                    def M_xoil(x):
-                        return M2oil.solve(x)
-
-                    Moil = LinearOperator((nx * ny * nz, nx * ny * nz), M_xoil)
-                    dsoil, exitCodeoil = gmres(
-                        -dGoil, Goil, tol=1e-6, atol=0, restart=20, maxiter=100, M=Moil
-                    )
-
-                # print(exitCode)
-                ds = cp.reshape(ds, (-1, 1), "F")
-                dsoil = cp.reshape(dsoil, (-1, 1), "F")
-
-                S = cp.add(S, ds)  # S+ds
-                Soil = cp.add(Soil, dsoil)  # S+ds
-
-                dsn = cp.linalg.norm(ds, 2)
-                dsnoil = cp.linalg.norm(dsoil, 2)
-
-                it = it + 1
-
-            if (dsn > 0.01) or (dsnoil > 0.01):
-                I = 2 ** (IT)
-                S = S00
-                Soil = S00oil
-
-        if (dsn < 0.01) or (dsnoil < 0.01):
-            conv = 1
+        # ── 5. Accept timestep or refine ─────────────────────────────────────
+        if not failed and res_w <= newton_tol and res_o <= newton_tol:
+            conv = True
         else:
-            IT = IT + 1
+            IT += 1
+
     return S, Soil
 
-    return S
-
+# ---------------------------------------------------------------------------
+# 1.  calc_mu_g  —  Gas Viscosity  [cP]
+# ---------------------------------------------------------------------------
 
 def calc_mu_g(p):
-    # Avergae reservoir pressure
-    mu_g = 3e-10 * p**2 + 1e-6 * p + 0.0133
-    return mu_g
+    """
+    Estimate gas viscosity as a quadratic function of pressure.
 
+    Physics
+    -------
+    Empirical polynomial fit (Lee-Kesler style):
+        μ_g(p) = 3×10⁻¹⁰·p² + 1×10⁻⁶·p + 0.0133
+
+    At low pressure  (p→0):    μ_g ≈ 0.0133 cP
+    At high pressure (p=5000): μ_g ≈ 0.026  cP  (physically reasonable)
+
+    Parameters
+    ----------
+    p : float or cupy.ndarray — reservoir pressure [psi]
+
+    Returns
+    -------
+    mu_g : float or cupy.ndarray — gas viscosity [cP]
+    """
+    return 3e-10 * p**2 + 1e-6 * p + 0.0133
+
+
+# ---------------------------------------------------------------------------
+# 2.  calc_rs  —  Solution Gas-Oil Ratio  [SCF/STB]
+# ---------------------------------------------------------------------------
 
 def calc_rs(p_bub, p):
-    # p=average reservoir pressure
-    if p < p_bub:
-        rs_factor = 1
-    else:
-        rs_factor = 0
-    rs = 178.11**2 / 5.615 * ((p / p_bub) ** 1.3 * rs_factor + (1 - rs_factor))
-    return rs
+    """
+    Compute the solution GOR at pressure p (Standing 1947 correlation).
 
+    Physics
+    -------
+    Below bubble point (p < p_bub):
+        RS = C · (p / p_bub)^1.3
+    Above bubble point (p ≥ p_bub):
+        RS = C  (constant — no more gas dissolves)
+
+    where C = 178.11² / 5.615 ≈ 5658 SCF/STB.
+
+    Parameters
+    ----------
+    p_bub : float — bubble-point pressure [psi]
+    p     : float or cupy.ndarray — reservoir pressure [psi]
+
+    Returns
+    -------
+    rs : float or cupy.ndarray — solution GOR [SCF/STB]
+    """
+    C = 178.11**2 / 5.615   # ≈ 5658 SCF/STB
+
+    if cp.isscalar(p) or isinstance(p, (int, float)):
+        if p < p_bub:
+            return float(C * (p / p_bub) ** 1.3)
+        else:
+            return float(C)
+    else:
+        p = cp.asarray(p, dtype=cp.float32)
+        return cp.where(
+            p < p_bub,
+            C * (p / p_bub) ** 1.3,
+            cp.full_like(p, C),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3.  calc_dp  —  Pressure Differential for FVF Correlations  [psi]
+# ---------------------------------------------------------------------------
 
 def calc_dp(p_bub, p_atm, p):
-    if p < p_bub:
-        dp = p_atm - p
-    else:
-        dp = p_atm - p_bub
-    return dp
+    """
+    Effective pressure differential used in FVF exponential fits.
 
+    Physics
+    -------
+    Below Pb:  dp = p_atm - p       (reservoir expanding toward atm)
+    Above Pb:  dp = p_atm - p_bub  (capped at bubble-point differential)
+
+    Parameters
+    ----------
+    p_bub : float — bubble-point pressure [psi]
+    p_atm : float — atmospheric pressure [psi]
+    p     : float or cupy.ndarray — reservoir pressure [psi]
+
+    Returns
+    -------
+    dp : float or cupy.ndarray — effective pressure differential [psi]
+    """
+    if cp.isscalar(p) or isinstance(p, (int, float)):
+        if p < p_bub:
+            return float(p_atm - p)
+        else:
+            return float(p_atm - p_bub)
+    else:
+        p = cp.asarray(p, dtype=cp.float32)
+        return cp.where(p < p_bub, p_atm - p, p_atm - p_bub)
+
+
+# ---------------------------------------------------------------------------
+# 4.  calc_bg  —  Gas Formation Volume Factor  [RB/SCF]
+# ---------------------------------------------------------------------------
 
 def calc_bg(p_bub, p_atm, p):
-    # P is avergae reservoir pressure
-    b_g = 1 / (cp.exp(1.7e-3 * calc_dp(p_bub, p_atm, p)))
-    return b_g
+    """
+    Compute the gas formation volume factor BG.
 
+    Physics
+    -------
+    BG = 1 / exp(1.7×10⁻³ · dp)
+
+    where dp = calc_dp(p_bub, p_atm, p).
+
+    At p = p_atm: dp = 0 → BG = 1  (correct — gas at surface conditions)
+    At reservoir pressure: dp < 0  → BG > 1  (gas expands on production)
+
+    Parameters
+    ----------
+    p_bub : float — bubble-point pressure [psi]
+    p_atm : float — atmospheric pressure [psi]
+    p     : float or cupy.ndarray — reservoir pressure [psi]
+
+    Returns
+    -------
+    b_g : float or cupy.ndarray — gas FVF [RB/SCF]
+    """
+    dp = calc_dp(p_bub, p_atm, p)
+    # dp is already float (scalar) or CuPy array — cp.exp handles both
+    
+    return 1.0 / cp.exp(1.7e-3 * dp)
+
+
+# ---------------------------------------------------------------------------
+# 5.  calc_bo  —  Oil Formation Volume Factor  [RB/STB]
+# ---------------------------------------------------------------------------
 
 def calc_bo(p_bub, p_atm, CFO, p):
-    # p is average reservoir pressure
-    if p < p_bub:
-        b_o = 1 / cp.exp(-8e-5 * (p_atm - p))
+    """
+    Compute the oil formation volume factor BO.
+
+    Physics
+    -------
+    Below bubble point (p < p_bub):
+        BO = 1 / exp(-8×10⁻⁵ · (p_atm - p))
+           = exp(8×10⁻⁵ · (p_atm - p))
+        BO > 1 at reservoir pressure (p > p_atm) ✓
+
+    Above bubble point (p ≥ p_bub):
+        BO = 1 / (exp(-8×10⁻⁵·(p_atm-p_bub)) · exp(-CFO·(p-p_bub)))
+        BO decreases with increasing pressure above Pb ✓
+
+    Parameters
+    ----------
+    p_bub : float — bubble-point pressure [psi]
+    p_atm : float — atmospheric pressure [psi]
+    CFO   : float — oil compressibility [1/psi]
+    p     : float or cupy.ndarray — reservoir pressure [psi]
+
+    Returns
+    -------
+    b_o : float or cupy.ndarray — oil FVF [RB/STB]
+    """
+    if cp.isscalar(p) or isinstance(p, (int, float)):
+        if p < p_bub:
+            return float(1.0 / cp.exp(-8e-5 * (p_atm - p)))
+        else:
+            return float(1.0 / (cp.exp(-8e-5 * (p_atm - p_bub))
+                                * cp.exp(-CFO * (p - p_bub))))
     else:
-        b_o = 1 / (cp.exp(-8e-5 * (p_atm - p_bub)) * cp.exp(-CFO * (p - p_bub)))
-    return b_o
+        p        = cp.asarray(p, dtype=cp.float32)
+        bo_below = 1.0 / cp.exp(-8e-5 * (p_atm - p))
+        bo_above = 1.0 / (cp.exp(-8e-5 * (p_atm - p_bub))
+                          * cp.exp(-CFO * (p - p_bub)))
+        return cp.where(p < p_bub, bo_below, bo_above)
+
 
 
 def GenA(nx, ny, nz, V, qsa):
@@ -3081,32 +1652,44 @@ def GenA(nx, ny, nz, V, qsa):
     and qsa is the source term. The output A is a sparse CSR matrix of shape (NxNyNz, NxNyNz)
     that can be used to solve the system of linear equations representing the flow of fluid through the porous media.
     """
-    Nx = nx
-    Ny = ny
-    Nz = nz
-    N = Nx * Ny * Nz
-    fp = cp.minimum(qsa, 0)
-    fp = cp.reshape(fp, (N), "F")
-    XN = cp.minimum(V["x"], 0)
-    x1 = cp.reshape(XN[:Nx, :, :], (N), "F")
-    YN = cp.minimum(V["y"], 0)
-    y1 = cp.reshape(YN[:, :Ny, :], (N), "F")
-    ZN = cp.minimum(V["z"], 0)
-    z1 = cp.reshape(ZN[:, :, :Nz], (N), "F")
-    XP = cp.maximum(V["x"], 0)
-    x2 = cp.reshape(XP[1 : Nx + 1, :, :], (N), "F")
-    YP = cp.maximum(V["y"], 0)
-    y2 = cp.reshape(YP[:, 1 : Ny + 1, :], (N), "F")
-    ZP = cp.maximum(V["z"], 0)
-    z2 = cp.reshape(ZP[:, :, 1 : Nz + 1], (N), "F")
+    N  = nx * ny * nz
+    Nx, Ny, Nz = nx, ny, nz
 
-    # print((fp+x1-x2+y1-y2+z1-z2).shape)
-    tempzz = fp + x1 - x2 + y1 - y2 + z1 - z2
-    tempzz = cp.ravel(tempzz)
+    # ------------------------------------------------------------------
+    # 1. Source term — outflow only (negative part)
+    # ------------------------------------------------------------------
+    fp = cp.ravel(cp.minimum(qsa, 0), order="F")   # (N,)
 
-    DiagVecs = [z2, y2, x2, tempzz, -x1, -y1, -z1]
-    DiagIndx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
-    A = spdiags(DiagVecs, DiagIndx, N, N, format="csr")
+    # ------------------------------------------------------------------
+    # 2. Face fluxes — compute positive/negative parts once per axis,
+    #    then immediately slice to the interior faces needed.
+    #    This avoids storing the full XN/XP arrays as named temporaries.
+    # ------------------------------------------------------------------
+    vx = V["x"]
+    x1 = cp.ravel(cp.minimum(vx[:Nx,      :,      :],    0), order="F")  # left  faces
+    x2 = cp.ravel(cp.maximum(vx[1:Nx+1,   :,      :],    0), order="F")  # right faces
+
+    vy = V["y"]
+    y1 = cp.ravel(cp.minimum(vy[:,    :Ny,      :],       0), order="F")
+    y2 = cp.ravel(cp.maximum(vy[:,  1:Ny+1,     :],       0), order="F")
+
+    vz = V["z"]
+    z1 = cp.ravel(cp.minimum(vz[:,      :,    :Nz],       0), order="F")
+    z2 = cp.ravel(cp.maximum(vz[:,      :,  1:Nz+1],      0), order="F")
+
+    # ------------------------------------------------------------------
+    # 3. Main diagonal — mass balance at each cell
+    # ------------------------------------------------------------------
+    diag_main = fp + x1 - x2 + y1 - y2 + z1 - z2   # (N,)  fused on GPU
+
+    # ------------------------------------------------------------------
+    # 4. Assemble diagonal vectors — stack into one 2-D array so spdiags
+    #    gets a single contiguous GPU allocation rather than a Python list.
+    # ------------------------------------------------------------------
+    diag_vecs = cp.stack([z2, y2, x2, diag_main, -x1, -y1, -z1])  # (7, N)
+    diag_indx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
+
+    A = spdiags(diag_vecs, diag_indx, N, N, format="csr")
     return A
 
 
@@ -3277,485 +1860,417 @@ def Reservoir_Simulator(
     NNNNNNNN         NNNNNNN           VVV           RRRRRRRR     RRRRRRRSSSSSSSSSSSSSSS  
     """
     print(text)
-    # Compute transmissibilities by harmonic averaging using Two-point flux approimxation
+    # ------------------------------------------------------------------
+    # 1.  Grid geometry  (plain Python/float — no cp.int32 truncation)
+    # ------------------------------------------------------------------
+    Nx, Ny, Nz = int(nx), int(ny), int(nz)
+    N  = Nx * Ny * Nz
 
-    Nx = cp.int32(nx)
-    Dx = cp.int32(Dx)
-    hx = Dx / Nx
-    Ny = cp.int32(ny)
-    Dy = cp.int32(Dy)
-    hy = Dy / Ny
-    Nz = cp.int32(nz)
-    Dz = cp.int32(Dz)
-    hz = Dz / Nz
-    N = Nx * Ny * Nz
+    hx = float(Dx) / Nx
+    hy = float(Dy) / Ny
+    hz = float(Dz) / Nz
 
-    tc2 = Equivalent_time(timmee, MAXZ, timmee, max_t)
+    # Cell volume (scalar)
+    Vol_scalar = hx * hy * hz
+    Vol        = cp.full((N, 1), Vol_scalar, dtype=cp.float32)
 
-    dt = np.diff(tc2)[0]
+    # TPFA face-transmissibility coefficients (scalars)
+    hx_n = 1.0 / Nx;  hy_n = 1.0 / Ny;  hz_n = 1.0 / Nz
+    tx   = 2.0 * hy_n * hz_n / hx_n
+    ty_c = 2.0 * hx_n * hz_n / hy_n
+    tz   = 2.0 * hx_n * hy_n / hz_n
 
-    porosity = cp.asarray(porosity)
-    Vol = hx * hy * hz
-    S = IWSw * cp.ones((N, 1), dtype=cp.float32)  # (SWI*cp.ones((N,1)))
-    Kq = cp.zeros((3, nx, ny, nz))
-    datause = cp.asarray(Kuse)
-    Qq = cp.asarray(quse)
-    quse_water = cp.asarray(quse_water)
-
-    # datause = Kuse#cp.reshape(Kuse,(nx,ny,nz),'F') #(dataa.reshape(nx,ny,1))
-    Kq[0, :, :, :] = datause
-    Kq[1, :, :, :] = datause
-    Kq[2, :, :, :] = factorr * datause
-
+    # ------------------------------------------------------------------
+    # 2.  Time vector
+    # ------------------------------------------------------------------
+    tc2 = cp.asarray(Equivalent_time(timmee, MAXZ, timmee, max_t))
+    dt  = float(cp.diff(tc2)[0])
+    St  = dt
     Runs = tc2.shape[0]
-    ty = np.arange(1, Runs + 1)
-    print("-----------------------------FORWARDING---------------------------")
 
-    St = dt
-    Nx = nx
-    Ny = ny
-    Nz = nz
+    # ------------------------------------------------------------------
+    # 3.  Static GPU arrays  (computed once)
+    # ------------------------------------------------------------------
+    porosity    = cp.asarray(porosity,    dtype=cp.float32)
+    datause     = cp.asarray(Kuse,        dtype=cp.float32)
+    Qq          = cp.asarray(quse,        dtype=cp.float32).ravel(order="F")
+    quse_water  = cp.asarray(quse_water,  dtype=cp.float32)
 
-    N = Nx * Ny * Nz
-    hx = 1 / Nx
-    hy = 1 / Ny
-    hz = 1 / Nz
-    tx = 2 * hy * hz / hx
-    ty = 2 * hx * hz / hy
-    tz = 2 * hx * hy / hz
+    Kq = cp.zeros((3, Nx, Ny, Nz), dtype=cp.float32)
+    Kq[0] = datause
+    Kq[1] = datause
+    Kq[2] = factorr * datause
 
-    if nz == 1:
-        output_allp = cp.zeros((steppi, nx, ny))
-        output_alls = cp.zeros((steppi, nx, ny))
+    S = IWSw * cp.ones((N, 1), dtype=cp.float32)
+
+    # ------------------------------------------------------------------
+    # 4.  Output buffers stay on GPU until the very end
+    # ------------------------------------------------------------------
+    if Nz == 1:
+        output_allp = cp.zeros((steppi, Nx, Ny),     dtype=cp.float32)
+        output_alls = cp.zeros((steppi, Nx, Ny),     dtype=cp.float32)
     else:
-        output_allp = cp.zeros((steppi, nx, ny, nz))
-        output_alls = cp.zeros((steppi, nx, ny, nz))
+        output_allp = cp.zeros((steppi, Nx, Ny, Nz), dtype=cp.float32)
+        output_alls = cp.zeros((steppi, Nx, Ny, Nz), dtype=cp.float32)
 
-    TX = cp.zeros((Nx + 1, Ny, Nz))
-    TY = cp.zeros((Nx, Ny + 1, Nz))
-    TZ = cp.zeros((Nx, Ny, Nz + 1))
+    # ------------------------------------------------------------------
+    # 5.  Transmissibility arrays allocated ONCE  (interior slices
+    #     overwritten in-place each timestep — no reallocation)
+    # ------------------------------------------------------------------
+    TX = cp.zeros((Nx + 1, Ny,      Nz),     dtype=cp.float32)
+    TY = cp.zeros((Nx,     Ny + 1,  Nz),     dtype=cp.float32)
+    TZ = cp.zeros((Nx,     Ny,      Nz + 1), dtype=cp.float32)
 
     b = Qq
-    for t in range(tc2.shape[0] - 1):
-        # step = t
+
+    print("-----------------------------FORWARDING---------------------------")
+
+    BO = cp.float32(BO)
+
+    # ------------------------------------------------------------------
+    # 6.  Main time loop
+    # ------------------------------------------------------------------
+    for t in range(Runs - 1):
         progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, t, Runs - 1)
         ShowBar(progressBar)
-        time.sleep(1)
 
-        # Mw,Mo,_,_= RelPerm(S,UW,UO,BW,BO,SWI,SWR)
+        # --- Mobility fields (vectorised, no Python loops) -------------
+        Sout = (S.reshape(Nx, Ny, Nz, order="F") - SWI) / (1.0 - SWI - SWR)
+        Mw   = Sout**2          / (UW * BW)
+        Mo   = (1.0 - Sout)**2  / (UO * float(BO))
+        Mt   = Mw + Mo          # shape (Nx, Ny, Nz)
 
-        Sout = (S - SWI) / (1 - SWI - SWR)
-        Mw = (Sout**2) / (UW * BW)  # Water mobility
-        Mo = (1 - Sout) ** 2 / (UO * BO)  # Oil mobility
-        Mt = cp.add(Mw, Mo)
+        # --- Effective permeability  KM = K * Mt  ----------------------
+        # Broadcast Mt across the 3 direction axis — no stack/reshape
+        KM = Kq * Mt[cp.newaxis, :, :, :]           # (3, Nx, Ny, Nz)
+        Ll = cp.reciprocal(KM)                       # 1/KM, fused on GPU
 
-        # RelPerm3(S,So, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz)
+        # --- Transmissibilities (in-place slice assignment) ------------
+        TX[1:Nx,  :,    :   ] = tx   / (Ll[0, :Nx-1, :,    :   ] + Ll[0, 1:Nx,  :,    :   ])
+        TY[:,     1:Ny, :   ] = ty_c / (Ll[1, :,     :Ny-1,:   ] + Ll[1, :,     1:Ny, :   ])
+        TZ[:,     :,    1:Nz] = tz   / (Ll[2, :,     :,    :Nz-1] + Ll[2, :,    :,    1:Nz])
 
-        atemp = cp.stack([Mt, Mt, Mt], axis=1)
-        KM = cp.multiply(cp.reshape(atemp.T, (3, nx, ny, nz), "F"), Kq)
+        # --- TPFA matrix assembly --------------------------------------
+        x1 = cp.ravel(TX[:Nx,       :,    :   ], order="F")
+        x2 = cp.ravel(TX[1:Nx+1,    :,    :   ], order="F")
+        y1 = cp.ravel(TY[:,    :Ny,  :   ],       order="F")
+        y2 = cp.ravel(TY[:,  1:Ny+1, :   ],       order="F")
+        z1 = cp.ravel(TZ[:,    :,    :Nz ],       order="F")
+        z2 = cp.ravel(TZ[:,    :,  1:Nz+1],       order="F")
 
-        Ll = 1.0 / KM
+        diag_main = x1 + x2 + y1 + y2 + z1 + z2
+        diag_vecs = cp.stack([-z2, -y2, -x2, diag_main, -x1, -y1, -z1])  # (7,N)
+        diag_indx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
 
-        TX[1:Nx, :, :] = tx / (Ll[0, : Nx - 1, :, :] + Ll[0, 1:Nx, :, :])
-        TY[:, 1:Ny, :] = ty / (Ll[1, :, : Ny - 1, :] + Ll[1, :, 1:Ny, :])
-        TZ[:, :, 1:Nz] = tz / (Ll[2, :, :, : Nz - 1] + Ll[2, :, :, 1:Nz])
-        # Assemble TPFA discretization matrix.
-        x1 = cp.reshape(TX[:Nx, :, :], (N), "F")
-        x2 = cp.reshape(TX[1 : Nx + 2, :, :], (N), "F")
-        y1 = cp.reshape(TY[:, :Ny, :], (N), "F")
-        y2 = cp.reshape(TY[:, 1 : Ny + 2, :], (N), "F")
-        z1 = cp.reshape(TZ[:, :, :Nz], (N), "F")
-        z2 = cp.reshape(TZ[:, :, 1 : Nz + 2], (N), "F")
-        DiagVecs = [-z2, -y2, -x2, x1 + x2 + y1 + y2 + z1 + z2, -x1, -y1, -z1]
-        DiagIndx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
-        A = spdiags(DiagVecs, DiagIndx, N, N, format="csr")
-        A[0, 0] = A[0, 0] + cp.sum(Kq[:, 0, 0, 0])
+        A = spdiags(diag_vecs, diag_indx, N, N, format="csr")
 
-        if method == 1:  # GMRES
-            M2 = spilu(A)
+        # Boundary correction — direct data-array edit, no index lookup
+        A[0, 0] = A[0, 0] + float(cp.sum(Kq[:, 0, 0, 0]))
 
-            def M_x(x):
-                return M2.solve(x)
+        # --- Preconditioner (built once per pressure solve) ------------
+        def _make_precond(mat):
+            try:
+                ilu = spilu(mat)
+                return LinearOperator((N, N), matvec=lambda x, f=ilu: f.solve(x))
+            except Exception:
+                return None
 
-            M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-            u, exitCode = gmres(A, b, tol=1e-6, atol=0, restart=20, maxiter=100, M=M)
+        # --- Pressure solve --------------------------------------------
+        if method == 1:                              # GMRES + ILU
+            M = _make_precond(A)
+            u, _ = gmres(A, b, rtol=1e-6, atol=0, restart=20, maxiter=100, M=M)
 
-        elif method == 2:  # SPSOLVE
+        elif method == 2:                            # Direct LU
             u = spsolve(A, b)
 
-        elif method == 3:  # CONJUGATE GRADIENT
-            M2 = spilu(A)
+        elif method == 3:                            # CG + ILU
+            M = _make_precond(A)
+            u, _ = cg(A, b, rtol=1e-6, atol=0, maxiter=100, M=M)
 
-            def M_x(x):
-                return M2.solve(x)
+        elif method == 4:                            # LSQR
+            u = lsqr(A, b)[0]
+        elif method == 5:                            #BiCGSTAB 
+            u, _ = bicgstab_ilu(A, b, tol=1e-6)
+        else:                                        # AMG
+            u = amg_solve(A, b)
 
-            M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-            u, exitCode = cg(A, b, tol=1e-6, atol=0, maxiter=100, M=M)
+        # --- Pressure field & Darcy fluxes ----------------------------
+        P = u.reshape(Nx, Ny, Nz, order="F")
 
-        elif method == 4:  # LSQR
-            u, istop, itn, normr = lsqr(A, b)[:4]
-        else:  # adaptive AMG
-            u = v_cycle(
-                A,
-                b,
-                x=cp.zeros_like(b),
-                smoother="SOR",
-                levels=2,
-                tol=1e-6,
-                smoothing_steps=2,
-            )
-
-        P = cp.reshape(u, (Nx, Ny, Nz), "F")
         V = {
-            "x": cp.zeros((Nx + 1, Ny, Nz)),
-            "y": cp.zeros((Nx, Ny + 1, Nz)),
-            "z": cp.zeros((Nx, Ny, Nz + 1)),
+            "x": cp.zeros((Nx + 1, Ny,     Nz),     dtype=cp.float32),
+            "y": cp.zeros((Nx,     Ny + 1, Nz),     dtype=cp.float32),
+            "z": cp.zeros((Nx,     Ny,     Nz + 1), dtype=cp.float32),
         }
-        V["x"][1:Nx, :, :] = (P[: Nx - 1, :, :] - P[1:Nx, :, :]) * TX[1:Nx, :, :]
-        V["y"][:, 1:Ny, :] = (P[:, : Ny - 1, :] - P[:, 1:Ny, :]) * TY[:, 1:Ny, :]
-        V["z"][:, :, 1:Nz] = (P[:, :, : Nz - 1] - P[:, :, 1:Nz]) * TZ[:, :, 1:Nz]
+        V["x"][1:Nx, :,    :   ] = (P[:Nx-1, :,    :   ] - P[1:Nx, :,    :   ]) * TX[1:Nx, :,    :   ]
+        V["y"][:,    1:Ny, :   ] = (P[:,    :Ny-1, :   ] - P[:,    1:Ny, :   ]) * TY[:,    1:Ny, :   ]
+        V["z"][:,    :,    1:Nz] = (P[:,    :,    :Nz-1] - P[:,    :,    1:Nz]) * TZ[:,    :,    1:Nz]
 
+        # --- Saturation update ----------------------------------------
         if CFL == 1:
             S = Upstream_2PHASE(
-                nx,
-                ny,
-                nz,
-                S,
-                UW,
-                UO,
-                BW,
-                BO,
-                SWI,
-                SWR,
-                Vol,
-                quse_water,
-                V,
-                dt,
-                porosity,
+                nx, ny, nz, S, UW, UO, BW, BO,
+                SWI, SWR, Vol, quse_water, V, dt, porosity,
             )
         else:
-            for ts in range(step2):
+            dt_sub = St / float(step2)
+            for _ in range(step2):
                 S = NewtRaph(
-                    nx,
-                    ny,
-                    nz,
-                    porosity,
-                    Vol,
-                    S,
-                    V,
-                    quse_water,
-                    St / float(step2),
-                    UW,
-                    UO,
-                    SWI,
-                    SWR,
-                    method,
-                    BW,
-                    BO,
+                    nx, ny, nz, porosity, Vol, S, V, quse_water,
+                    dt_sub, UW, UO, SWI, SWR, method, BW, BO,
                 )
 
-        # print(msg)
-        S = np.clip(S, SWI, 1)
-        S2 = np.reshape(S, (Nx, Ny, Nz), "F")
-        # soil = np.clip((1-S),SWI,1)
-        pinii = cp.reshape(P, (-1, 1), "F")
+        S = cp.clip(S, SWI, 1.0)
 
-        if nz == 1:
-            output_allp[t, :, :] = P[:, :, 0]
-            output_alls[t, :, :] = cp.asarray(S2[:, :, 0])
-        else:
-            output_allp[t, :, :, :] = P
-            output_alls[t, :, :, :] = cp.asarray(S2)
+        # --- Store outputs (still on GPU) -----------------------------
+        P_field = P if Nz > 1 else P[:, :, 0]
+        S_field = S.reshape(Nx, Ny, Nz, order="F")
+        S_field = S_field if Nz > 1 else S_field[:, :, 0]
 
-        Ppz = cp.mean(pinii.reshape(-1, 1), axis=0)
+        if t < steppi:
+            output_allp[t] = P_field
+            output_alls[t] = S_field
 
-        BO = cp.float32(np.ndarray.item(cp.asnumpy(calc_bo(PB, PATM, CFO, Ppz))))
-    progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, t + 1, Runs - 1)
+        # --- Update BO (pressure-dependent) ---------------------------
+        Ppz  = float(cp.mean(P))
+        BO   = calc_bo(PB, PATM, CFO, Ppz)
+
+    progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, Runs - 1, Runs - 1)
     ShowBar(progressBar)
-    time.sleep(1)
 
-    # """
+    # ------------------------------------------------------------------
+    # 7.  Single host transfer at the end
+    # ------------------------------------------------------------------
     Big = cp.vstack([output_allp, output_alls])
     return cp.asnumpy(Big)
 
 
-##############################################################################
-#         FINITE VOLUME RESERVOIR SIMULATOR
-##############################################################################
-def Reservoir_Simulator2(
-    Kuse,
-    porosity,
-    quse,
-    quse_water,
-    quse_oil,
-    nx,
-    ny,
-    nz,
-    factorr,
-    max_t,
-    Dx,
-    Dy,
-    Dz,
-    BO,
-    BW,
-    BG,
-    RS,
-    CFL,
-    timmee,
-    MAXZ,
-    PB,
-    PATM,
-    CFO,
-    IWSw,
-    IWSo,
-    method,
-    steppi,
-    SWI,
-    SWR,
-    UW,
-    UO,
-    UG,
-    step2,
-    pini_alt,
-    SWOW,
-    SWOG,
-):
-    # Compute transmissibilities by harmonic averaging using Two-point flux approimxation
 
-    Nx = cp.int32(nx)
-    Dx = cp.int32(Dx)
-    hx = Dx / Nx
-    Ny = cp.int32(ny)
-    Dy = cp.int32(Dy)
-    hy = Dy / Ny
-    Nz = cp.int32(nz)
-    Dz = cp.int32(Dz)
-    hz = Dz / Nz
+def Reservoir_Simulator2(
+    Kuse, porosity, quse, quse_water, quse_oil,
+    nx, ny, nz, factorr, max_t,
+    Dx, Dy, Dz, BO, BW, BG, RS, CFL, timmee, MAXZ,
+    PB, PATM, CFO, IWSw, IWSo, method, steppi,
+    SWI, SWR, UW, UO, UG, step2, pini_alt, SWOW, SWOG,
+):
+    """
+    3-phase finite-volume reservoir simulator (pressure + water/oil/gas sat.).
+
+    Returns
+    -------
+    Big : numpy.ndarray, shape (4*steppi, nx, ny[, nz])
+        Stacked: pressure | water-sat | oil-sat | gas-sat
+    """
+
+    # ------------------------------------------------------------------
+    # 1.  Grid geometry  (plain Python floats — no cp.int32 truncation)
+    # ------------------------------------------------------------------
+    tables = _build_relperm3_tables(SWOW, SWOG)
+    Nx, Ny, Nz = int(nx), int(ny), int(nz)
     N = Nx * Ny * Nz
 
-    tc2 = Equivalent_time(timmee, MAXZ, timmee, max_t)
+    hx = float(Dx) / Nx
+    hy = float(Dy) / Ny
+    hz = float(Dz) / Nz
 
-    dt = np.diff(tc2)[0]
+    Vol_scalar = hx * hy * hz
+    Vol        = cp.full((N, 1), Vol_scalar, dtype=cp.float32)
 
-    porosity = cp.asarray(porosity)
-    Vol = hx * hy * hz
-    S = IWSw * cp.ones((N, 1), dtype=cp.float32)  # (SWI*cp.ones((N,1)))
-    Soil = IWSo * cp.ones((N, 1), dtype=cp.float32)  # (SWI*cp.ones((N,1)))
-    Kq = cp.zeros((3, nx, ny, nz))
-    datause = cp.asarray(Kuse)
-    Qq = cp.asarray(quse)
-    quse_water = cp.asarray(quse_water)
-    quse_oil = cp.asarray(quse_oil)
-    # datause = Kuse#cp.reshape(Kuse,(nx,ny,nz),'F') #(dataa.reshape(nx,ny,1))
-    Kq[0, :, :, :] = datause
-    Kq[1, :, :, :] = datause
-    Kq[2, :, :, :] = factorr * datause
+    # Normalised TPFA coefficients
+    hx_n = 1.0 / Nx;  hy_n = 1.0 / Ny;  hz_n = 1.0 / Nz
+    tx   = 2.0 * hy_n * hz_n / hx_n
+    ty_c = 2.0 * hx_n * hz_n / hy_n
+    tz   = 2.0 * hx_n * hy_n / hz_n
 
+    # ------------------------------------------------------------------
+    # 2.  Time vector
+    # ------------------------------------------------------------------
+    tc2  = cp.asarray(Equivalent_time(timmee, MAXZ, timmee, max_t))
+    dt   = float(cp.diff(tc2)[0])
+    St   = dt
     Runs = tc2.shape[0]
-    ty = np.arange(1, Runs + 1)
+
+    # ------------------------------------------------------------------
+    # 3.  Static GPU arrays (computed once)
+    # ------------------------------------------------------------------
+    porosity   = cp.asarray(porosity,   dtype=cp.float32)
+    datause    = cp.asarray(Kuse,       dtype=cp.float32)
+    Qq         = cp.asarray(quse,       dtype=cp.float32).ravel(order="F")
+    quse_water = cp.asarray(quse_water, dtype=cp.float32)
+    quse_oil   = cp.asarray(quse_oil,   dtype=cp.float32)
+
+    Kq = cp.zeros((3, Nx, Ny, Nz), dtype=cp.float32)
+    Kq[0] = datause
+    Kq[1] = datause
+    Kq[2] = factorr * datause
+
+    S    = IWSw * cp.ones((N, 1), dtype=cp.float32)
+    Soil = IWSo * cp.ones((N, 1), dtype=cp.float32)
+
+    # ------------------------------------------------------------------
+    # 4.  Output buffers stay on GPU until the very end
+    # ------------------------------------------------------------------
+    shape2d = (steppi, Nx, Ny)
+    shape3d = (steppi, Nx, Ny, Nz)
+    buf_shape = shape2d if Nz == 1 else shape3d
+
+    output_allp    = cp.zeros(buf_shape, dtype=cp.float32)
+    output_alls    = cp.zeros(buf_shape, dtype=cp.float32)
+    output_allsoil = cp.zeros(buf_shape, dtype=cp.float32)
+    output_allsgas = cp.zeros(buf_shape, dtype=cp.float32)
+
+    # ------------------------------------------------------------------
+    # 5.  Transmissibility arrays allocated ONCE
+    # ------------------------------------------------------------------
+    TX = cp.zeros((Nx + 1, Ny,     Nz),     dtype=cp.float32)
+    TY = cp.zeros((Nx,     Ny + 1, Nz),     dtype=cp.float32)
+    TZ = cp.zeros((Nx,     Ny,     Nz + 1), dtype=cp.float32)
+
+    b  = Qq
+    # BO = cp.float32(BO)
+    # BG = cp.float32(BG)
+    # RS = cp.float32(RS)
+
     print("-----------------------------FORWARDING---------------------------")
 
-    St = dt
-    Nx = nx
-    Ny = ny
-    Nz = nz
+    # ------------------------------------------------------------------
+    # 6.  Preconditioner helper (avoids repeated closure redefinition)
+    # ------------------------------------------------------------------
+    def _make_precond(mat):
+        try:
+            ilu = spilu(mat)
+            return LinearOperator((N, N), matvec=lambda x, f=ilu: f.solve(x))
+        except Exception:
+            return None
 
-    N = Nx * Ny * Nz
-    hx = 1 / Nx
-    hy = 1 / Ny
-    hz = 1 / Nz
-    tx = 2 * hy * hz / hx
-    ty = 2 * hx * hz / hy
-    tz = 2 * hx * hy / hz
-
-    if nz == 1:
-        output_allp = cp.zeros((steppi, nx, ny))
-        output_alls = cp.zeros((steppi, nx, ny))
-        output_allsoil = cp.zeros((steppi, nx, ny))
-        output_allsgas = cp.zeros((steppi, nx, ny))
-    else:
-        output_allp = cp.zeros((steppi, nx, ny, nz))
-        output_alls = cp.zeros((steppi, nx, ny, nz))
-        output_allsoil = cp.zeros((steppi, nx, ny, nz))
-        output_allsgas = cp.zeros((steppi, nx, ny, nz))
-
-    TX = cp.zeros((Nx + 1, Ny, Nz))
-    TY = cp.zeros((Nx, Ny + 1, Nz))
-    TZ = cp.zeros((Nx, Ny, Nz + 1))
-
-    b = Qq
-    for t in range(tc2.shape[0] - 1):
-        # step = t
+    # ------------------------------------------------------------------
+    # 7.  Main time loop
+    # ------------------------------------------------------------------
+    for t in range(Runs - 1):
         progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, t, Runs - 1)
         ShowBar(progressBar)
-        time.sleep(1)
 
+        # --- Phase mobilities ------------------------------------------
         Mw, Mo, Mg, _, _, _ = RelPerm3(
-            S, Soil, UW, UO, UG, BW, BO, BG, SWI, SWR, nx, ny, nz, SWOW, SWOG
+            S, Soil, UW, UO, UG, BW, float(BO), float(BG),
+            SWI, SWR, Nx, Ny, Nz, tables
         )
 
-        Mt = Mw + Mo + Mg + Mo * RS  # cp.add(cp.add(Mw,Mo),Mg)
-        atemp = cp.stack([Mt, Mt, Mt], axis=1)
-        KM = cp.multiply(cp.reshape(atemp.T, (3, nx, ny, nz), "F"), Kq)
+        # Total mobility — includes dissolved-gas contribution
+        #Mt = Mw + Mo + Mg #+ Mo * float(RS)       # (N,1) or scalar-broadcast
+        
+        Mt = Mw / float(BW) + Mo / float(BO) * (1.0 + float(RS)) + Mg / float(BG)
 
-        Ll = 1.0 / KM
+        # --- Effective permeability — single broadcast multiply --------
+        Mt_3d = Mt.reshape(Nx, Ny, Nz, order="F")
+        KM    = Kq * Mt_3d[cp.newaxis, :, :, :]  # (3,Nx,Ny,Nz) fused
+        Ll    = cp.reciprocal(KM)                 # (3,Nx,Ny,Nz)
 
-        TX[1:Nx, :, :] = tx / (Ll[0, : Nx - 1, :, :] + Ll[0, 1:Nx, :, :])
-        TY[:, 1:Ny, :] = ty / (Ll[1, :, : Ny - 1, :] + Ll[1, :, 1:Ny, :])
-        TZ[:, :, 1:Nz] = tz / (Ll[2, :, :, : Nz - 1] + Ll[2, :, :, 1:Nz])
-        # Assemble TPFA discretization matrix.
-        x1 = cp.reshape(TX[:Nx, :, :], (N), "F")
-        x2 = cp.reshape(TX[1 : Nx + 2, :, :], (N), "F")
-        y1 = cp.reshape(TY[:, :Ny, :], (N), "F")
-        y2 = cp.reshape(TY[:, 1 : Ny + 2, :], (N), "F")
-        z1 = cp.reshape(TZ[:, :, :Nz], (N), "F")
-        z2 = cp.reshape(TZ[:, :, 1 : Nz + 2], (N), "F")
-        DiagVecs = [-z2, -y2, -x2, x1 + x2 + y1 + y2 + z1 + z2, -x1, -y1, -z1]
-        DiagIndx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
-        A = spdiags(DiagVecs, DiagIndx, N, N, format="csr")
-        A[0, 0] = A[0, 0] + cp.sum(Kq[:, 0, 0, 0])
+        # --- Transmissibilities (in-place slice update) ----------------
+        TX[1:Nx,  :,    :   ] = tx   / (Ll[0, :Nx-1, :,    :   ] + Ll[0, 1:Nx,  :,    :   ])
+        TY[:,     1:Ny, :   ] = ty_c / (Ll[1, :,     :Ny-1,:   ] + Ll[1, :,     1:Ny, :   ])
+        TZ[:,     :,    1:Nz] = tz   / (Ll[2, :,     :,    :Nz-1] + Ll[2, :,    :,    1:Nz])
 
-        if method == 1:  # GMRES
-            M2 = spilu(A)
+        # --- TPFA matrix assembly (corrected slice bounds) -------------
+        x1 = cp.ravel(TX[:Nx,      :,     :   ], order="F")
+        x2 = cp.ravel(TX[1:Nx+1,   :,     :   ], order="F")
+        y1 = cp.ravel(TY[:,   :Ny,  :   ],        order="F")
+        y2 = cp.ravel(TY[:, 1:Ny+1, :   ],        order="F")
+        z1 = cp.ravel(TZ[:,    :,   :Nz ],        order="F")
+        z2 = cp.ravel(TZ[:,    :, 1:Nz+1],        order="F")
 
-            def M_x(x):
-                return M2.solve(x)
+        diag_main = x1 + x2 + y1 + y2 + z1 + z2
+        diag_vecs = cp.stack([-z2, -y2, -x2, diag_main, -x1, -y1, -z1])  # (7,N)
+        diag_indx = [-Nx * Ny, -Nx, -1, 0, 1, Nx, Nx * Ny]
 
-            M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-            u, exitCode = gmres(A, b, tol=1e-6, atol=0, restart=20, maxiter=100, M=M)
+        A = spdiags(diag_vecs, diag_indx, N, N, format="csr")
+        A[0, 0] = A[0, 0] + float(cp.sum(Kq[:, 0, 0, 0]))
 
-        elif method == 2:  # SPSOLVE
+        # --- Pressure solve --------------------------------------------
+        if method == 1:
+            M = _make_precond(A)
+            u, _ = gmres(A, b, rtol=1e-6, atol=0, restart=20, maxiter=100, M=M)
+        elif method == 2:
             u = spsolve(A, b)
+        elif method == 3:
+            M = _make_precond(A)
+            u, _ = cg(A, b, rtol=1e-6, atol=0, maxiter=100, M=M)
+        elif method == 4:
+            u = lsqr(A, b)[0]
+        elif method == 5:                            #BiCGSTAB 
+            u, _ = bicgstab_ilu(A, b, tol=1e-6)            
+        else:
+            u = amg_solve(A, b)
 
-        elif method == 3:  # CONJUGATE GRADIENT
-            M2 = spilu(A)
+        # --- Pressure field & Darcy fluxes ----------------------------
+        P = u.reshape(Nx, Ny, Nz, order="F")
 
-            def M_x(x):
-                return M2.solve(x)
-
-            M = LinearOperator((nx * ny * nz, nx * ny * nz), M_x)
-            u, exitCode = cg(A, b, tol=1e-6, atol=0, maxiter=100, M=M)
-
-        elif method == 4:  # LSQR
-            u, istop, itn, normr = lsqr(A, b)[:4]
-        else:  # adaptive AMG
-            u = v_cycle(
-                A,
-                b,
-                x=cp.zeros_like(b),
-                smoother="SOR",
-                levels=2,
-                tol=1e-6,
-                smoothing_steps=2,
-            )
-
-        P = cp.reshape(u, (Nx, Ny, Nz), "F")
         V = {
-            "x": cp.zeros((Nx + 1, Ny, Nz)),
-            "y": cp.zeros((Nx, Ny + 1, Nz)),
-            "z": cp.zeros((Nx, Ny, Nz + 1)),
+            "x": cp.zeros((Nx + 1, Ny,     Nz),     dtype=cp.float32),
+            "y": cp.zeros((Nx,     Ny + 1, Nz),     dtype=cp.float32),
+            "z": cp.zeros((Nx,     Ny,     Nz + 1), dtype=cp.float32),
         }
-        V["x"][1:Nx, :, :] = (P[: Nx - 1, :, :] - P[1:Nx, :, :]) * TX[1:Nx, :, :]
-        V["y"][:, 1:Ny, :] = (P[:, : Ny - 1, :] - P[:, 1:Ny, :]) * TY[:, 1:Ny, :]
-        V["z"][:, :, 1:Nz] = (P[:, :, : Nz - 1] - P[:, :, 1:Nz]) * TZ[:, :, 1:Nz]
+        V["x"][1:Nx, :,    :   ] = (P[:Nx-1, :,    :   ] - P[1:Nx, :,    :   ]) * TX[1:Nx, :,    :   ]
+        V["y"][:,    1:Ny, :   ] = (P[:,    :Ny-1, :   ] - P[:,    1:Ny, :   ]) * TY[:,    1:Ny, :   ]
+        V["z"][:,    :,    1:Nz] = (P[:,    :,    :Nz-1] - P[:,    :,    1:Nz]) * TZ[:,    :,    1:Nz]
 
+        # --- Saturation update ----------------------------------------
         if CFL == 1:
             S, Soil = Upstream_3PHASE(
-                nx,
-                ny,
-                nz,
-                S,
-                Soil,
-                UW,
-                UO,
-                UG,
-                BW,
-                BO,
-                BG,
-                RS,
-                SWI,
-                SWR,
-                Vol,
-                quse_water,
-                quse_oil,
-                V,
-                dt,
-                porosity,
-                SWOW,
-                SWOG,
+                nx, ny, nz, S, Soil, UW, UO, UG,
+                BW, BO, BG, RS, SWI, SWR, Vol,
+                quse_water, quse_oil, V, dt, porosity, tables,
             )
         else:
-            for ts in range(step2):
+            dt_sub = St / float(step2)
+            for _ in range(step2):
                 S, Soil = NewtRaph2(
-                    nx,
-                    ny,
-                    nz,
-                    porosity,
-                    Vol,
-                    S,
-                    Soil,
-                    V,
-                    quse_water,
-                    quse_oil,
-                    St / float(step2),
-                    UW,
-                    UO,
-                    UG,
-                    SWI,
-                    SWR,
-                    method,
-                    BW,
-                    BO,
-                    BG,
-                    RS,
-                    SWOW,
-                    SWOG,
+                    nx, ny, nz, porosity, Vol, S, Soil, V,
+                    quse_water, quse_oil, dt_sub,
+                    UW, UO, UG, SWI, SWR, method,
+                    BW, BO, BG, RS,SWOW, SWOG, tables,
                 )
 
-        # print(msg)
-        S = np.clip(S, SWI, 1)
-        # Soil = np.clip(Soil, 0., 1)
+# def NewtRaph2(
+    # nx, ny, nz, porosity, Vol, S, Soil, V, qinn, qinnoil,
+    # Tt, UW, UO, UG, SWI, SWR, method2, BW, BO, BG, RS, SWOW, SWOG,
+    # tables=None,
+    # max_newton=20,       # was 5 — far too few for 3-phase
+    # newton_tol=1e-3,     # was 0.01 — loosen slightly to avoid excess iters
+    # max_it=8,            # max dt halvings before giving up
+# ):
+        S = cp.clip(S, SWI, 1.0)
 
-        S2 = np.reshape((S), (Nx, Ny, Nz), "F")  # it is water
-        S2oil = np.reshape((Soil), (Nx, Ny, Nz), "F")  # it is gas
-        S2gas = 1 - abs(S2 + S2oil)  # it is oil
-        S2gas = np.clip(S2gas, SWI, 1)
-        # soil = np.clip((1-S),SWI,1)
-        pinii = cp.reshape(P, (-1, 1), "F")
+        # --- Phase saturation fields (all on GPU, no cp.asarray no-ops) -
+        S2    = S.reshape(Nx, Ny, Nz, order="F")     # water
+        S2oil = Soil.reshape(Nx, Ny, Nz, order="F")  # gas (Eclipse convention)
+        S2gas = cp.clip(1.0 - cp.abs(S2 + S2oil), SWI, 1.0)  # oil
 
-        if nz == 1:
-            output_allp[t, :, :] = P[:, :, 0]
-            output_alls[t, :, :] = cp.asarray(S2[:, :, 0])
-            output_allsoil[t, :, :] = cp.asarray(S2gas[:, :, 0])
-            output_allsgas[t, :, :] = cp.asarray(S2oil[:, :, 0])
-        else:
-            output_allp[t, :, :, :] = P
-            output_alls[t, :, :, :] = cp.asarray(S2)
-            output_allsoil[t, :, :, :] = cp.asarray(S2gas)
-            output_allsgas[t, :, :, :] = cp.asarray(S2oil)
+        # --- Store outputs (still on GPU) -----------------------------
+        if t < steppi:
+            if Nz == 1:
+                output_allp[t]    = P[:, :, 0]
+                output_alls[t]    = S2[:, :, 0]
+                output_allsoil[t] = S2gas[:, :, 0]
+                output_allsgas[t] = S2oil[:, :, 0]
+            else:
+                output_allp[t]    = P
+                output_alls[t]    = S2
+                output_allsoil[t] = S2gas
+                output_allsgas[t] = S2oil
 
-        Ppz = cp.mean(pinii.reshape(-1, 1), axis=0)
+        # --- Update PVT parameters (direct float cast, no numpy round-trip) ---
+        Ppz = float(cp.mean(P))
+        BO  = calc_bo(PB, PATM, CFO, Ppz)
+        BG  = calc_bg(PB, PATM, Ppz)/ 5.61458
+        RS  = calc_rs(PB, Ppz)
 
-        BO = cp.float32(np.ndarray.item(cp.asnumpy(calc_bo(PB, PATM, CFO, Ppz))))
-        BG = cp.float32(np.ndarray.item(cp.asnumpy(calc_bg(PB, PATM, Ppz))))
-        RS = cp.float32(np.ndarray.item(cp.asnumpy(calc_rs(PB, Ppz))))
-
-        # if (BG <= 0.001):
-        #     BG = 0.001
-
-        # if (BG >= 0.01):
-        #     BG = 0.01
-
-        # if (RS <= 50.0):
-        #     RS = 50.
-        # if (RS >= 2000.0):
-        #     RS = 2000.
-
-    progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, t + 1, Runs - 1)
+    progressBar = "\rSimulation Progress: " + ProgressBar(Runs - 1, Runs - 1, Runs - 1)
     ShowBar(progressBar)
-    time.sleep(1)
 
-    # """
+    # ------------------------------------------------------------------
+    # 8.  Single host transfer at the very end
+    # ------------------------------------------------------------------
     Big = cp.vstack([output_allp, output_alls, output_allsoil, output_allsgas])
     return cp.asnumpy(Big)
 
@@ -3815,295 +2330,3 @@ def rescale_linear_pytorch_numpy(array, new_min, new_max, minimum, maximum):
     b = minimum - m * new_min
     return m * array + b
 
-
-def plot3d2static(arr_3d, nx, ny, nz, namet, titti, maxii, minii, injectors, producers):
-    """
-    Plot a 3D array with matplotlib and annotate specific points on the plot.
-
-    Args:
-    arr_3d (np.ndarray): 3D array to plot.
-    nx (int): number of cells in the x direction.
-    ny (int): number of cells in the y direction.
-    nz (int): number of cells in the z direction.
-    itt (int): current iteration number.
-    dt (float): time step.
-    MAXZ (int): maximum number of iterations in the z direction.
-    namet (str): name of the file to save the plot.
-    titti (str): title of the plot.
-    maxii (float): maximum value of the colorbar.
-    minii (float): minimum value of the colorbar.
-
-    Returns:
-    None.
-    """
-    fig = plt.figure(figsize=(15, 15), dpi=100)
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Shift the coordinates to center the points at the voxel locations
-    x, y, z = np.indices((arr_3d.shape))
-    x = x + 0.5
-    y = y + 0.5
-    z = z + 0.5
-
-    # Set the colors of each voxel using a jet colormap
-    colors = plt.cm.jet(arr_3d)
-    norm = matplotlib.colors.Normalize(vmin=minii, vmax=maxii)
-
-    # Plot each voxel and save the mappable object
-    ax.voxels(arr_3d, facecolors=colors, alpha=0.5, edgecolor="none", shade=True)
-    m = cm.ScalarMappable(cmap=plt.cm.jet, norm=norm)
-    m.set_array([])
-
-    plt.colorbar(m, fraction=0.02, pad=0.1, label=" Log 10 - K(mD)")
-
-    # Add a colorbar for the mappable object
-    # plt.colorbar(mappable)
-    # Set the axis labels and title
-    ax.set_xlabel("X axis")
-    ax.set_ylabel("Y axis")
-    ax.set_zlabel("Z axis")
-    # ax.set_title(titti,fontsize= 14)
-
-    # Set axis limits to reflect the extent of each axis of the matrix
-    ax.set_xlim(0, arr_3d.shape[0])
-    ax.set_ylim(0, arr_3d.shape[1])
-    ax.set_zlim(0, arr_3d.shape[2])
-    # ax.set_zlim(0, 60)
-
-    # Remove the grid
-    ax.grid(False)
-
-    # Set lighting to bright
-    ax.set_facecolor("white")
-    # Set the aspect ratio of the plot
-
-    ax.set_box_aspect([nx, ny, nz * 2])
-
-    # Set the projection type to orthogonal
-    ax.set_proj_type("ortho")
-
-    # Remove the tick labels on each axis
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-    ax.set_zticklabels([])
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-    # Remove the tick lines on each axis
-    ax.xaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.xaxis._axinfo["tick"]["outward_factor"] = 0.4
-    ax.yaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.yaxis._axinfo["tick"]["outward_factor"] = 0.4
-    ax.zaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.zaxis._axinfo["tick"]["outward_factor"] = 0.4
-
-    # Set the azimuth and elevation to make the plot brighter
-    ax.view_init(elev=30, azim=45)
-
-    n_inj = len(injectors)  # Number of injectors
-    n_prod = len(producers)  # Number of producers
-
-    for mm in range(n_inj):
-        usethis = injectors[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-        # Define the direction of the line
-        line_dir = (0, 0, (nz * 2) + 2)
-        # Define the coordinates of the line end
-        x_line_end = xloc + line_dir[0]
-        y_line_end = yloc + line_dir[1]
-        z_line_end = 0 + line_dir[2]
-        ax.plot([xloc, xloc], [yloc, yloc], [0, (nz * 2) + 2], "black", linewidth=2)
-        ax.text(
-            x_line_end,
-            y_line_end,
-            z_line_end,
-            discrip,
-            color="black",
-            weight="bold",
-            fontsize=16,
-        )
-
-    for mm in range(n_prod):
-        usethis = producers[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-        # Define the direction of the line
-        line_dir = (0, 0, (nz * 2) + 2)
-        # Define the coordinates of the line end
-        x_line_end = xloc + line_dir[0]
-        y_line_end = yloc + line_dir[1]
-        z_line_end = 0 + line_dir[2]
-        ax.plot([xloc, xloc], [yloc, yloc], [0, (nz * 2) + 2], "r", linewidth=2)
-        ax.text(
-            x_line_end,
-            y_line_end,
-            z_line_end,
-            discrip,
-            color="r",
-            weight="bold",
-            fontsize=16,
-        )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    plt.suptitle(titti, fontsize=16)
-
-    name = namet + ".png"
-    plt.savefig(name)
-    # plt.show()
-    plt.clf()
-
-
-def plot3d2(
-    arr_3d, nx, ny, nz, itt, dt, MAXZ, namet, titti, maxii, minii, injectors, producers
-):
-    """
-    Plot a 3D array with matplotlib and annotate specific points on the plot.
-
-    Args:
-    arr_3d (np.ndarray): 3D array to plot.
-    nx (int): number of cells in the x direction.
-    ny (int): number of cells in the y direction.
-    nz (int): number of cells in the z direction.
-    itt (int): current iteration number.
-    dt (float): time step.
-    MAXZ (int): maximum number of iterations in the z direction.
-    namet (str): name of the file to save the plot.
-    titti (str): title of the plot.
-    maxii (float): maximum value of the colorbar.
-    minii (float): minimum value of the colorbar.
-
-    Returns:
-    None.
-    """
-    fig = plt.figure(figsize=(12, 12), dpi=100)
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Shift the coordinates to center the points at the voxel locations
-    x, y, z = np.indices((arr_3d.shape))
-    x = x + 0.5
-    y = y + 0.5
-    z = z + 0.5
-
-    # Set the colors of each voxel using a jet colormap
-    colors = plt.cm.jet(arr_3d)
-    norm = matplotlib.colors.Normalize(vmin=minii, vmax=maxii)
-
-    # Plot each voxel and save the mappable object
-    ax.voxels(arr_3d, facecolors=colors, alpha=0.5, edgecolor="none", shade=True)
-    m = cm.ScalarMappable(cmap=plt.cm.jet, norm=norm)
-    m.set_array([])
-
-    if titti == "Pressure":
-        plt.colorbar(m, fraction=0.02, pad=0.1, label="Pressure [psia]")
-    elif titti == "water_sat":
-        plt.colorbar(m, fraction=0.02, pad=0.1, label="water_sat [units]")
-    else:
-        plt.colorbar(m, fraction=0.02, pad=0.1, label="oil_sat [psia]")
-
-    # Add a colorbar for the mappable object
-    # plt.colorbar(mappable)
-    # Set the axis labels and title
-    ax.set_xlabel("X axis")
-    ax.set_ylabel("Y axis")
-    ax.set_zlabel("Z axis")
-
-    # Set axis limits to reflect the extent of each axis of the matrix
-    ax.set_xlim(0, arr_3d.shape[0])
-    ax.set_ylim(0, arr_3d.shape[1])
-    ax.set_zlim(0, arr_3d.shape[2])
-    # ax.set_zlim(0, 10)
-
-    # Remove the grid
-    ax.grid(False)
-
-    # Set lighting to bright
-    ax.set_facecolor("white")
-    # Set the aspect ratio of the plot
-
-    ax.set_box_aspect([nx, ny, nz * 2])
-
-    # Set the projection type to orthogonal
-    ax.set_proj_type("ortho")
-
-    # Remove the tick labels on each axis
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-    ax.set_zticklabels([])
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-    # Remove the tick lines on each axis
-    ax.xaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.xaxis._axinfo["tick"]["outward_factor"] = 0.4
-    ax.yaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.yaxis._axinfo["tick"]["outward_factor"] = 0.4
-    ax.zaxis._axinfo["tick"]["inward_factor"] = 0
-    ax.zaxis._axinfo["tick"]["outward_factor"] = 0.4
-
-    # Set the azimuth and elevation to make the plot brighter
-    ax.view_init(elev=30, azim=45)
-
-    n_inj = len(injectors)  # Number of injectors
-    n_prod = len(producers)  # Number of producers
-
-    for mm in range(n_inj):
-        usethis = injectors[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-        # Define the direction of the line
-        line_dir = (0, 0, (nz * 2) + 2)
-        # Define the coordinates of the line end
-        x_line_end = xloc + line_dir[0]
-        y_line_end = yloc + line_dir[1]
-        z_line_end = 0 + line_dir[2]
-        ax.plot([xloc, xloc], [yloc, yloc], [0, (nz * 2) + 2], "black", linewidth=2)
-        ax.text(
-            x_line_end,
-            y_line_end,
-            z_line_end,
-            discrip,
-            color="black",
-            weight="bold",
-            fontsize=16,
-        )
-
-    for mm in range(n_prod):
-        usethis = producers[mm]
-        xloc = int(usethis[0])
-        yloc = int(usethis[1])
-        discrip = str(usethis[8])
-        # Define the direction of the line
-        line_dir = (0, 0, (nz * 2) + 2)
-        # Define the coordinates of the line end
-        x_line_end = xloc + line_dir[0]
-        y_line_end = yloc + line_dir[1]
-        z_line_end = 0 + line_dir[2]
-        ax.plot([xloc, xloc], [yloc, yloc], [0, (nz * 2) + 2], "r", linewidth=2)
-        ax.text(
-            x_line_end,
-            y_line_end,
-            z_line_end,
-            discrip,
-            color="r",
-            weight="bold",
-            fontsize=16,
-        )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    tita = str(titti) + "- Timestep --" + str(int((itt + 1) * dt * MAXZ)) + " days"
-
-    plt.suptitle(tita, fontsize=16)
-
-    # name = namet + str(int(itt)) + '.png'
-    name = namet + "{:03d}.png".format(int(itt))
-    plt.savefig(name)
-    # plt.show()
-    plt.close(fig)
