@@ -2,13 +2,33 @@
 
 <!-- markdownlint-disable -->
 
-[![Project Status: Active - The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
+> [!CAUTION]
+> ⚠️ **physicsnemo-sym has been upstreamed into [NVIDIA/physicsnemo](https://github.com/NVIDIA/physicsnemo) and this repository is now archived.**
+> **All active development, bug fixes, and new features will occur exclusively in the upstream repository. No further updates will be made here.**
+> 
+> ## Migrating to `physicsnemo`
+> 
+> The symbolic PDE functionality previously provided by this package is now available as an optional extra in nvidia-physicsnemo:
+> ```bash
+> pip install "nvidia-physicsnemo[sym]"
+> ```
+> 
+> The upstream release includes breaking API changes. Notable highlights:
+> 
+> * Pre-built PDE classes (e.g., `NavierStokes`, `Diffusion`) are no longer shipped. PDEs are now defined inline using SymPy, giving you full flexibility over your equations.
+> * `Key` is replaced by plain strings.
+> * `Arch` is replaced by standard `torch.nn.Module`.
+> * Geometry is now handled using `physicsnemo.mesh` + PyVista.
+> 
+> For a full list of changes and code examples, please refer to the [v2.0 Migration Guide](https://github.com/NVIDIA/physicsnemo/blob/main/v2.0-MIGRATION-GUIDE.md#physicsnemo-sym--physicsnemosym).
+> 
+> We encourage all users to migrate at their earliest convenience. If you encounter issues during migration, please open an issue in the upstream repository.
+
+[![Project Status: Moved - The key components of this project have been upstreamed to PhysicsNeMo.](https://www.repostatus.org/badges/latest/moved.svg)](https://www.repostatus.org/#moved)
 [![GitHub](https://img.shields.io/github/license/NVIDIA/physicsnemo)](https://github.com/NVIDIA/physicsnemo/blob/master/LICENSE.txt)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 <!-- markdownlint-enable -->
-[**PhysicsNeMo Sym**](#What-is-PhysicsNeMo-Symbolic)
-| [**Getting started**](#Getting-started)
-| [**Documentation**](https://docs.nvidia.com/deeplearning/physicsnemo/physicsnemo-core/index.html)
+[**Documentation**](https://docs.nvidia.com/deeplearning/physicsnemo/physicsnemo-core/index.html)
 | [**Contributing Guidelines**](#contributing-to-physicsnemo)
 | [**Communication**](#communication)
 
